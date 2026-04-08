@@ -1,0 +1,14 @@
+# Ignore everything that causes Docker build conflicts
+data/
+mlruns/
+artifacts/
+__pycache__/
+*.pyc
+*.pt
+*.pkl
+.env
+.git
+.gitignore
+.DS_Store
+report/
+notebooks/
