@@ -2,8 +2,8 @@ name: Daily GNN Retraining
 
 on:
   schedule:
-    - cron: '0 3 * * *'     # Runs daily at 03:00 UTC
-  workflow_dispatch:        # Allows manual trigger from GitHub UI
+    - cron: '0 3 * * *'     # Daily at 03:00 UTC
+  workflow_dispatch:        # Manual trigger
 
 jobs:
   retrain:
@@ -23,19 +23,19 @@ jobs:
         run: python -m pip install --upgrade pip
 
       - name: Install dependencies
-        run: |
-          pip install --no-cache-dir -r requirements.txt
+        run: pip install --no-cache-dir -r requirements.txt
 
+      # === FIXED COMMANDS BELOW (using python -m) ===
       - name: Ingest real GDSC data
-        run: python src/ingestion/data_ingest.py
+        run: python -m src.ingestion.data_ingest
 
       - name: Build heterogeneous knowledge graph
-        run: python src/preprocessing/build_graph.py
+        run: python -m src.preprocessing.build_graph
 
       - name: Train GNN model
-        run: python src/training/train_gnn.py
+        run: python -m src.training.train_gnn
 
-      - name: Show MLflow summary
+      - name: Show summary
         run: |
-          echo "✅ Training completed successfully"
+          echo "✅ Daily retraining completed successfully"
           ls -la artifacts/
