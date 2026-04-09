@@ -18,3 +18,20 @@ services:
       - ./mlruns:/app/mlruns
       - ./artifacts:/app/artifacts
     command: streamlit run frontend/app.py --server.port 8501 --server.address 0.0.0.0
+
+  # New service: Runs the full pipeline once on startup
+  pipeline-init:
+    build: .
+    volumes:
+      - ./data:/app/data
+      - ./mlruns:/app/mlruns
+      - ./artifacts:/app/artifacts
+    command: |
+      sh -c "
+        python -m src.ingestion.data_ingest &&
+        python -m src.preprocessing.build_graph &&
+        python -m src.training.train_gnn &&
+        echo '✅ Pipeline initialization completed successfully'
+      "
+    depends_on:
+      - fastapi
