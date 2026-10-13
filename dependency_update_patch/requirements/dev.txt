@@ -1,0 +1,9 @@
+-r ml.txt
+-r api.txt
+-r frontend.txt
+-r chemistry.txt
+-r data.txt
+pytest>=8.3,<10
+ruff>=0.9,<1
+mypy>=1.13,<2
+pre-commit>=4.0,<5

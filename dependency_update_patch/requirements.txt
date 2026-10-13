@@ -1,0 +1,6 @@
+# Full local/runtime environment
+-r requirements/ml.txt
+-r requirements/api.txt
+-r requirements/frontend.txt
+-r requirements/chemistry.txt
+-r requirements/data.txt

@@ -1,0 +1,20 @@
+stages:
+  ingest_openpedcan:
+    cmd: python -m src.ingestion.data_ingest
+    deps:
+      - src/ingestion/data_ingest.py
+      - src/ingestion/openpedcan.py
+    outs:
+      - data/raw/openpedcan
+      - data/metadata/openpedcan_manifest.json
+
+  build_pediatric_graph:
+    cmd: python -m src.preprocessing.build_graph
+    deps:
+      - data/raw/openpedcan
+      - src/preprocessing/build_graph.py
+      - src/ingestion/openpedcan.py
+    outs:
+      - data/processed/pediatric_samples.tsv
+      - data/processed/pediatric_kg.pt
+      - data/metadata/pediatric_kg_mappings.json
