@@ -101,6 +101,7 @@ def run_variant(
     model_ids: np.ndarray,
     drug_graph,
     drug_id_to_index: dict[str, int],
+    feature_meta: dict,
     args,
     device: torch.device,
 ) -> tuple[pd.DataFrame, dict, dict]:
@@ -261,17 +262,18 @@ def run_variant(
             "dropout": args.dropout,
             "top_k_genes": args.top_k_genes,
         },
-        "selected_gene_indices": None,
+        "selected_gene_indices": feature_meta["selected_gene_indices"],
+        "expression_scaler_fit_scope": feature_meta["fit_scope"],
     }
     return result, metrics, checkpoint
 
 
 def compare_external_baselines(
     oof: pd.DataFrame,
-    baseline_specs: dict[str, tuple[Path, str]],
+    baseline_specs: dict[str, tuple[Path, str, str]],
 ) -> dict:
     comparisons = {}
-    for name, (path, prediction_column) in baseline_specs.items():
+    for name, (path, prediction_column, actual_column) in baseline_specs.items():
         if not path.is_file():
             comparisons[name] = {"status": "missing", "path": str(path)}
             continue
@@ -279,65 +281,62 @@ def compare_external_baselines(
             path,
             dtype={"curve_id": str, "drug_id": str, "sanger_model_id": str},
         )
-        if "curve_id" not in baseline or prediction_column not in baseline:
+        required = {"curve_id", "fold", prediction_column, actual_column}
+        if required - set(baseline.columns):
             comparisons[name] = {
                 "status": "missing_required_columns",
                 "path": str(path),
+                "missing_columns": sorted(required - set(baseline.columns)),
                 "available_columns": list(baseline.columns),
             }
             continue
         if baseline["curve_id"].duplicated().any():
             raise ValueError(f"Duplicate curve IDs in comparator {path}.")
-        for endpoint in ENDPOINTS:
-            variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
-            if endpoint not in baseline:
-                comparisons[f"{name}_{endpoint}"] = {
-                    "status": "missing_actual_endpoint_column"
-                }
-                continue
-            columns = ["curve_id", "fold", endpoint, prediction_column]
-            joined = oof[["curve_id", "fold", *variant_cols]].merge(
-                baseline[columns],
-                on="curve_id",
-                how="inner",
-                validate="one_to_one",
-                suffixes=("_oof", "_baseline"),
+        endpoint = "ln_ic50" if "ln_ic50" in name else "auc"
+        variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
+        selected_baseline = baseline[
+            ["curve_id", "fold", actual_column, prediction_column]
+        ].rename(columns={actual_column: "comparator_actual"})
+        joined = oof[["curve_id", "fold", f"actual_{endpoint}", *variant_cols]].merge(
+            selected_baseline,
+            on="curve_id",
+            how="inner",
+            validate="one_to_one",
+            suffixes=("_oof", "_baseline"),
+        )
+        comparison_key = f"{name}_{endpoint}"
+        if len(joined) == 0:
+            comparisons[comparison_key] = {"status": "no_overlap"}
+            continue
+        fold_match = np.array_equal(
+            joined["fold_oof"].to_numpy(), joined["fold_baseline"].to_numpy()
+        )
+        if not fold_match:
+            raise ValueError(f"Fold assignments differ in comparator {name}.")
+        # Ensure both files agree on the measured target before scoring.
+        actual_oof = joined[f"actual_{endpoint}"].to_numpy(dtype=float)
+        actual_comparator = joined["comparator_actual"].to_numpy(dtype=float)
+        if not np.allclose(actual_oof, actual_comparator, rtol=0, atol=1e-8):
+            raise ValueError(f"Measured target values differ in comparator {name}.")
+        prediction_metrics = {
+            variant: metric_block(
+                actual_oof,
+                joined[f"pred_{variant}_{endpoint}"].to_numpy(dtype=float),
             )
-            if len(joined) == 0:
-                comparisons[f"{name}_{endpoint}"] = {"status": "no_overlap"}
-                continue
-            fold_col = "fold_oof" if "fold_oof" in joined else "fold"
-            # If the join only has one fold column, require no mismatch implicitly;
-            # if both sources supplied one, pandas suffixes it and we compare.
-            baseline_fold_col = "fold_baseline"
-            fold_match = (
-                np.array_equal(
-                    joined[fold_col].to_numpy(),
-                    joined[baseline_fold_col].to_numpy(),
-                )
-                if baseline_fold_col in joined
-                else True
-            )
-            if not fold_match:
-                raise ValueError(f"Fold assignments differ in comparator {name}.")
-            actual = joined[endpoint].to_numpy(dtype=float)
-            pred_metrics = {
-                variant: metric_block(
-                    actual, joined[f"pred_{variant}_{endpoint}"].to_numpy(dtype=float)
-                )
-                for variant in VARIANTS
-            }
-            pred_metrics["external_baseline"] = metric_block(
-                actual, joined[prediction_column].to_numpy(dtype=float)
-            )
-            comparisons[f"{name}_{endpoint}"] = {
-                "status": "compared",
-                "overlap_rows": int(len(joined)),
-                "total_oof_rows": int(len(oof)),
-                "coverage_fraction": float(len(joined) / len(oof)),
-                "fold_assignments_identical": fold_match,
-                "metrics": pred_metrics,
-            }
+            for variant in VARIANTS
+        }
+        prediction_metrics["external_baseline"] = metric_block(
+            actual_oof, joined[prediction_column].to_numpy(dtype=float)
+        )
+        comparisons[comparison_key] = {
+            "status": "compared",
+            "overlap_rows": int(len(joined)),
+            "total_oof_rows": int(len(oof)),
+            "coverage_fraction": float(len(joined) / len(oof)),
+            "fold_assignments_identical": fold_match,
+            "measured_targets_identical": True,
+            "metrics": prediction_metrics,
+        }
     return comparisons
 
 
@@ -430,6 +429,7 @@ def main(args) -> dict:
                 model_ids,
                 drug_graph,
                 drug_id_to_index,
+                feature_meta,
                 args,
                 device,
             )
@@ -501,18 +501,22 @@ def main(args) -> dict:
             "drug_cancer_median_ln_ic50": (
                 baseline_dir / "gdsc2_ln_ic50_oof_predictions.csv",
                 "B2_drug_cancer_median",
+                "actual_ln_ic50",
             ),
             "drug_cancer_median_auc": (
                 baseline_dir / "gdsc2_auc_oof_predictions.csv",
                 "B2_drug_cancer_median",
+                "actual_auc",
             ),
             "expression_ridge_ln_ic50": (
                 molecular_dir / "gdsc2_expression_ln_ic50_oof_predictions.csv",
                 "expression_ridge",
+                "ln_ic50",
             ),
             "expression_ridge_auc": (
                 molecular_dir / "gdsc2_expression_auc_oof_predictions.csv",
                 "expression_ridge",
+                "auc",
             ),
         },
     )
