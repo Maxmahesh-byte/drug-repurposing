@@ -14,6 +14,18 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.utils.config import CONFIG
 
 
+EDGE_ATTRIBUTE_NAMES = (
+    "variant_count",
+    "copy_number_count",
+    "fusion_count",
+    "ln_ic50",
+    "auc",
+    "copy_number_gain_count",
+    "copy_number_loss_count",
+    "copy_number_unclassified_count",
+)
+
+
 def _build_node_features(graph, node_mapping):
     node_types = sorted({attributes.get("type", "unknown") for _, attributes in graph.nodes(data=True)})
     if len(node_types) > 32:
@@ -52,23 +64,55 @@ def _add_mutation_edges(graph, mutations, clinical_samples):
 
 def _add_copy_number_summary(graph, copy_number_calls, sample_to_tumor):
     calls = copy_number_calls.copy()
+    required_columns = {"sample_id", "gene_symbol", "status"}
+    missing_columns = required_columns - set(calls.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Copy-number calls are missing required columns: {sorted(missing_columns)}"
+        )
     calls["tumor_type"] = calls["sample_id"].map(sample_to_tumor).fillna("").replace("", "unclassified")
+    calls["status"] = calls["status"].fillna("").astype(str).str.strip()
     calls = calls[calls["gene_symbol"].ne("")]
-    grouped = calls.groupby(["tumor_type", "gene_symbol"], sort=False).size()
-    for (tumor, gene), call_count in grouped.items():
+    grouped = calls.groupby(
+        ["tumor_type", "gene_symbol", "status"], sort=False, dropna=False
+    ).size()
+    for (tumor, gene, status), call_count in grouped.items():
+        normalized_status = status.casefold().replace("_", " ").replace("-", " ")
+        if normalized_status in {"gain", "amplification"}:
+            direction = "gain"
+        elif normalized_status in {
+            "loss",
+            "deletion",
+            "deep deletion",
+            "deep loss",
+        }:
+            direction = "loss"
+        else:
+            direction = "unclassified"
         graph.add_node(tumor, type="tumor_type")
         graph.add_node(gene, type="gene")
-        if graph.has_edge(tumor, gene) and graph.edges[tumor, gene].get("relation") == "copy_number_in_tumor":
-            graph.edges[tumor, gene]["copy_number_count"] += int(call_count)
-        else:
+        if not (
+            graph.has_edge(tumor, gene)
+            and graph.edges[tumor, gene].get("relation") == "copy_number_in_tumor"
+        ):
             graph.add_edge(
                 tumor,
                 gene,
                 relation="copy_number_in_tumor",
                 variant_count=0,
-                copy_number_count=int(call_count),
+                copy_number_count=0,
                 fusion_count=0,
+                copy_number_gain_count=0,
+                copy_number_loss_count=0,
+                copy_number_unclassified_count=0,
+                copy_number_status_counts={},
             )
+        attributes = graph.edges[tumor, gene]
+        attributes["copy_number_count"] += int(call_count)
+        direction_key = f"copy_number_{direction}_count"
+        attributes[direction_key] += int(call_count)
+        status_counts = attributes["copy_number_status_counts"]
+        status_counts[status] = status_counts.get(status, 0) + int(call_count)
 
 
 def _add_fusion_edges(graph, fusions, clinical_samples):
@@ -261,6 +305,19 @@ def _edge_provenance_records(graph_edges):
         dict(attributes)
         for _, _, attributes in graph_edges
     ]
+
+
+def _edge_attribute_values(attributes):
+    return [
+        float(attributes.get("variant_count", 0)),
+        float(attributes.get("copy_number_count", 0)),
+        float(attributes.get("fusion_count", 0)),
+        float(attributes.get("ln_ic50", 0)),
+        float(attributes.get("auc", 0)),
+        float(attributes.get("copy_number_gain_count", 0)),
+        float(attributes.get("copy_number_loss_count", 0)),
+        float(attributes.get("copy_number_unclassified_count", 0)),
+    ]
 def build_openpedcan_graph():
     """Build a graph from OpenPedCan clinical metadata and consensus variants."""
     openpedcan_dir = Path(CONFIG["raw_data_path"]) / "openpedcan"
@@ -316,7 +373,7 @@ def build_openpedcan_graph():
     copy_number_unmatched: set[str] = set()
     for calls in pd.read_csv(
         copy_number_path,
-        usecols=["sample_id", "gene_symbol"],
+        usecols=["sample_id", "gene_symbol", "status"],
         dtype=str,
         keep_default_na=False,
         chunksize=100_000,
@@ -368,16 +425,7 @@ def build_openpedcan_graph():
         dtype=torch.float32,
     )
     edge_attr = torch.tensor(
-        [
-            [
-                float(attributes.get("variant_count", 0)),
-                float(attributes.get("copy_number_count", 0)),
-                float(attributes.get("fusion_count", 0)),
-                float(attributes.get("ln_ic50", 0)),
-                float(attributes.get("auc", 0)),
-            ]
-            for _, _, attributes in graph_edges
-        ],
+        [_edge_attribute_values(attributes) for _, _, attributes in graph_edges],
         dtype=torch.float32,
     )
     x = _build_node_features(G, node_mapping)
@@ -395,6 +443,7 @@ def build_openpedcan_graph():
     data.node_ids = [str(node) for node in node_mapping]
     data.node_type_names = node_types
     data.edge_relation_names = edge_relations
+    data.edge_attr_names = list(EDGE_ATTRIBUTE_NAMES)
     torch.save(data, str(processed_path / "openpedcan_graph.pt"))
     print(f"OpenPedCan graph built: {data.num_nodes} nodes, {data.num_edges} edges")
     return data

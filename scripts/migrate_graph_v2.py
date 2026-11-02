@@ -152,6 +152,14 @@ def main() -> int:
         raise ValueError("edge_type length does not match edge count")
     if graph.edge_attr.shape[0] != n_edges or graph.edge_weight.numel() != n_edges:
         raise ValueError("edge attributes/weights do not match edge count")
+    edge_attribute_columns = list(
+        getattr(graph, "edge_attr_names", LEGACY_EDGE_ATTR_COLUMNS)
+    )
+    if len(edge_attribute_columns) != graph.edge_attr.shape[1]:
+        raise ValueError(
+            "Edge attribute column names do not match the edge_attr width: "
+            f"{len(edge_attribute_columns)} names for {graph.edge_attr.shape[1]} values."
+        )
     if not torch.isfinite(graph.x).all().item():
         raise ValueError("Node feature tensor contains non-finite values")
     if not torch.isfinite(graph.edge_attr).all().item():
@@ -348,6 +356,7 @@ def main() -> int:
     hetero.type_mismatch_edge_count = int(mismatch_edge_total)
     hetero.legacy_node_type_features_removed = True
     hetero.legacy_edge_attributes_preserved_as = "edge_attr_legacy"
+    hetero.legacy_edge_attribute_columns = edge_attribute_columns
     hetero.legacy_edge_weights_preserved_as = "edge_weight_legacy"
 
     output_graph = output_dir / "typed_graph_v2.pt"
@@ -372,7 +381,7 @@ def main() -> int:
             "shape": list(graph.x.shape),
             "interpretation": "One-hot node-type encoding only; not biological features. Removed from node stores to avoid implying otherwise.",
         },
-        "legacy_edge_attribute_columns": LEGACY_EDGE_ATTR_COLUMNS,
+        "legacy_edge_attribute_columns": edge_attribute_columns,
         "legacy_edge_attribute_note": "Retained as edge_attr_legacy. Columns mix counts and GDSC response values and are not a universal feature set or confidence score.",
         "legacy_edge_weight_note": "Retained as edge_weight_legacy for traceability only. The original builder combines mutation/copy-number/fusion counts and defaults to 1; do not interpret as calibrated confidence.",
         "known_limitations": [

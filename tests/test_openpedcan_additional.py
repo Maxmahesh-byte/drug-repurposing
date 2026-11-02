@@ -10,7 +10,12 @@ from src.ingestion.openpedcan_additional import (
     build_openpedcan_copy_number_dataset,
     build_openpedcan_fusion_dataset,
 )
-from src.preprocessing.build_graph import _add_copy_number_summary, _add_fusion_edges
+from src.preprocessing.build_graph import (
+    EDGE_ATTRIBUTE_NAMES,
+    _add_copy_number_summary,
+    _add_fusion_edges,
+    _edge_attribute_values,
+)
 
 
 def _build_clinical_release(output_dir, release_dir):
@@ -84,14 +89,27 @@ def test_graph_keeps_copy_number_and_fusion_relations_distinct():
     graph = nx.Graph()
     calls = pd.DataFrame(
         {
-            "sample_id": ["BS-001", "BS-002", "BS-003"],
-            "gene_symbol": ["MYCN", "MYCN", "CDKN2A"],
+            "sample_id": ["BS-001", "BS-002", "BS-004", "BS-005", "BS-003"],
+            "gene_symbol": ["MYCN", "MYCN", "MYCN", "MYCN", "CDKN2A"],
+            "status": [
+                "amplification",
+                "deep deletion",
+                "gain",
+                "loss",
+                "unknown",
+            ],
         }
     )
     _add_copy_number_summary(
         graph,
         calls,
-        {"BS-001": "brain tumor", "BS-002": "brain tumor", "BS-003": ""},
+        {
+            "BS-001": "brain tumor",
+            "BS-002": "brain tumor",
+            "BS-003": "",
+            "BS-004": "brain tumor",
+            "BS-005": "brain tumor",
+        },
     )
 
     fusions = pd.DataFrame(
@@ -106,8 +124,32 @@ def test_graph_keeps_copy_number_and_fusion_relations_distinct():
     unmatched = _add_fusion_edges(graph, fusions, {"BS-001"})
 
     assert graph["brain tumor"]["MYCN"]["relation"] == "copy_number_in_tumor"
-    assert graph["brain tumor"]["MYCN"]["copy_number_count"] == 2
+    assert graph["brain tumor"]["MYCN"]["copy_number_count"] == 4
+    assert graph["brain tumor"]["MYCN"]["copy_number_gain_count"] == 2
+    assert graph["brain tumor"]["MYCN"]["copy_number_loss_count"] == 2
+    assert graph["brain tumor"]["MYCN"]["copy_number_status_counts"] == {
+        "amplification": 1,
+        "deep deletion": 1,
+        "gain": 1,
+        "loss": 1,
+    }
+    assert dict(
+        zip(EDGE_ATTRIBUTE_NAMES, _edge_attribute_values(graph["brain tumor"]["MYCN"]))
+    ) == {
+        "variant_count": 0.0,
+        "copy_number_count": 4.0,
+        "fusion_count": 0.0,
+        "ln_ic50": 0.0,
+        "auc": 0.0,
+        "copy_number_gain_count": 2.0,
+        "copy_number_loss_count": 2.0,
+        "copy_number_unclassified_count": 0.0,
+    }
     assert graph["unclassified"]["CDKN2A"]["copy_number_count"] == 1
+    assert graph["unclassified"]["CDKN2A"]["copy_number_unclassified_count"] == 1
+    assert graph["unclassified"]["CDKN2A"]["copy_number_status_counts"] == {
+        "unknown": 1,
+    }
     assert unmatched == {"BS-999"}
     fusion_id = "BS-001|ETV6--NTRK3|exonic"
     assert graph["BS-001"][fusion_id]["relation"] == "has_fusion"
