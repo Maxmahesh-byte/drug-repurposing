@@ -163,7 +163,11 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
 
 
 class DrugCellLinePairGNN(nn.Module):
-    """RGCN drug encoder + expression MLP + pairwise dual-endpoint head."""
+    """Three-layer RGCN drug encoder + expression MLP + pairwise dual-endpoint head.
+
+    Three message-passing layers are required for a gene to traverse the full
+    reverse evidence path gene -> target -> ChEMBL molecule -> drug.
+    """
 
     def __init__(
         self,
@@ -195,6 +199,11 @@ class DrugCellLinePairGNN(nn.Module):
         )
         self.drug_norm1 = nn.LayerNorm(hidden_dim)
         self.drug_norm2 = nn.LayerNorm(hidden_dim)
+        self.drug_conv3 = RGCNConv(
+            hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_bases
+        )
+        self.drug_norm3 = nn.LayerNorm(hidden_dim)
+        self.num_message_passing_layers = 3
 
         self.cell_encoder = nn.Sequential(
             nn.Linear(num_expression_features, hidden_dim * 2),
@@ -233,6 +242,8 @@ class DrugCellLinePairGNN(nn.Module):
         hidden = F.dropout(hidden, p=self.dropout, training=self.training)
         hidden2 = self.drug_conv2(hidden, edge_index, edge_type)
         hidden = self.drug_norm2(F.relu(hidden2 + hidden))
+        hidden3 = self.drug_conv3(hidden, edge_index, edge_type)
+        hidden = self.drug_norm3(F.relu(hidden3 + hidden))
         return hidden[: self.num_drugs], self.cell_encoder(expression_features)
 
     def score_pairs(
