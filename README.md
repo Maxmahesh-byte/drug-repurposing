@@ -141,3 +141,21 @@ The runner compares three variants on identical frozen outer folds and inner cel
 - `expression_only`: expression encoder only, with neither drug identity nor graph.
 
 All variants share fold-specific expression feature selection/scaling. LN(IC50) and AUC are standardised independently using inner-fit response rows only; predictions are inverse-transformed before MAE, RMSE, and R² are reported. This avoids the larger numerical scale of LN(IC50) dominating the joint training loss. Fold checkpoints, OOF predictions, fold metrics, and external baseline comparisons (where exact curve-ID and fold overlap is available) are saved locally. The experiment remains a known-drug, held-out-cell-line, transductive in-vitro benchmark, not an unseen-drug or clinical evaluation.
+
+
+### Repeated-seed pair-GNN ablations and uncertainty
+
+To reuse the existing seed-42 ablation OOF output and train four additional seeds (43–46) on the same frozen outer folds:
+
+```bash
+./.venv/bin/python -m pytest tests/test_gdsc2_pair_gnn_multiseed.py -q
+
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_multiseed.py \
+  --seeds 43 44 45 46 \
+  --reference-oof data/ai/gdsc2_pair_gnn_ablations/gdsc2_pair_gnn_ablation_oof_predictions.csv \
+  --output-root data/ai/gdsc2_pair_gnn_multiseed
+```
+
+The orchestrator trains the full-graph, drug-ID-only, and expression-only variants for each additional seed. It checks that every OOF file contains the same response curve IDs, Sanger model IDs, frozen outer-fold assignments, and observed response labels as the reference seed. Inner validation groups and initialisation vary with seed, while the outer test folds stay fixed. It then invokes `analyze_gdsc2_pair_gnn_uncertainty.py` across all OOF runs and saves a manifest plus bootstrap results.
+
+Each seed is written into a separate directory; existing outputs are not overwritten unless `--overwrite` is specified. A new run therefore does not replace the original seed-42 results. The cell-line cluster bootstrap remains conditional on each fitted model; repeated seeds are summarised separately to show sensitivity to training randomness.
