@@ -164,16 +164,19 @@ def assemble_response_dataset(
         ]
     ).astype(int)
 
-    if selected["fold"].isna().any():
-        raise ValueError("Some response rows have no frozen baseline fold.")
+    numeric_folds = pd.to_numeric(selected["fold"], errors="coerce")
+    if numeric_folds.isna().any() or not np.equal(
+        numeric_folds.to_numpy(dtype=float),
+        np.floor(numeric_folds.to_numpy(dtype=float)),
+    ).all():
+        raise ValueError("Some response rows have missing or non-integer frozen fold IDs.")
+    if not numeric_folds.isin(range(5)).all():
+        invalid_folds = sorted(numeric_folds[~numeric_folds.isin(range(5))].unique().tolist())
+        raise ValueError(f"Unexpected frozen fold IDs outside 0-4: {invalid_folds}.")
+    selected["fold"] = numeric_folds.astype(int)
     folds_per_model = selected.groupby("sanger_model_id")["fold"].nunique()
     if folds_per_model.gt(1).any():
         raise ValueError("A Sanger model ID occurs in more than one held-out fold.")
-    if selected["fold"].nunique() != 5:
-        raise ValueError(
-            f"Expected all five frozen folds in the matched subset; found "
-            f"{sorted(selected['fold'].unique().tolist())}."
-        )
     for target in ("ln_ic50", "auc"):
         values = pd.to_numeric(selected[target], errors="coerce").to_numpy(dtype=float)
         if not np.isfinite(values).all():
@@ -224,6 +227,12 @@ def main(
     pairs, model_expression, model_ids, expression_columns = assemble_response_dataset(
         responses, crosswalk, sample_labels, gene_ids, expression
     )
+    found_folds = sorted(pairs["fold"].unique().tolist())
+    if found_folds != list(range(5)):
+        raise ValueError(
+            "The complete matched real-data benchmark must contain all five "
+            f"frozen folds 0-4; found {found_folds}."
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     pair_path = output_dir / "gdsc2_matched_response_pairs.csv"
