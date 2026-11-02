@@ -220,7 +220,7 @@ def run_fold(
         "ln_ic50": metric_block(test_rows["ln_ic50"].to_numpy(), predictions[:, 0]),
         "auc": metric_block(test_rows["auc"].to_numpy(), predictions[:, 1]),
     }
-    return result, metrics
+    return result, metrics, best_state
 
 
 def main(args) -> dict:
@@ -288,7 +288,7 @@ def main(args) -> dict:
     fold_metrics = []
     for fold in range(1, 6):
         print(f"\n===== Outer held-out fold {fold}/5 =====", flush=True)
-        predictions, metrics = run_fold(
+        predictions, metrics, best_state = run_fold(
             fold, pairs, expression, model_ids, gene_ids,
             compact_graph, drug_id_to_index, args, device,
         )
@@ -297,9 +297,15 @@ def main(args) -> dict:
         fold_path = output_dir / f"fold_{fold}_best_state.pt"
         torch.save(
             {
-                "state_dict": None,
+                "state_dict": best_state,
                 "fold": fold,
-                "note": "Fold metrics/predictions are saved; model weights are omitted from this artifact.",
+                "model_config": {
+                    "hidden_dim": args.hidden_dim,
+                    "dropout": args.dropout,
+                    "top_k_genes": args.top_k_genes,
+                },
+                "drug_ids": compact_graph.drug_ids,
+                "gene_ids": gene_ids.tolist(),
             },
             fold_path,
         )
