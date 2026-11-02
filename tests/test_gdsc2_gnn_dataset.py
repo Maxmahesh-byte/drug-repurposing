@@ -79,3 +79,10 @@ def test_rejects_duplicate_expression_column_assignment():
     crosswalk.loc[1, "expression_sample_column_index_0based"] = 0
     with pytest.raises(ValueError, match="one expression column to multiple models"):
         assemble_response_dataset(responses, crosswalk, labels, genes, expression)
+
+
+def test_rejects_fold_id_outside_frozen_five_fold_scheme():
+    responses, crosswalk, labels, genes, expression = _fixture()
+    responses.loc[2, "fold"] = 5
+    with pytest.raises(ValueError, match="Unexpected frozen fold IDs outside 0-4"):
+        assemble_response_dataset(responses, crosswalk, labels, genes, expression)
