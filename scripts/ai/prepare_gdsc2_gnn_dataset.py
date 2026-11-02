@@ -174,9 +174,9 @@ def assemble_response_dataset(
         np.floor(numeric_folds.to_numpy(dtype=float)),
     ).all():
         raise ValueError("Some response rows have missing or non-integer frozen fold IDs.")
-    if not numeric_folds.isin(range(5)).all():
-        invalid_folds = sorted(numeric_folds[~numeric_folds.isin(range(5))].unique().tolist())
-        raise ValueError(f"Unexpected frozen fold IDs outside 0-4: {invalid_folds}.")
+    if not numeric_folds.isin(range(1, 6)).all():
+        invalid_folds = sorted(numeric_folds[~numeric_folds.isin(range(1, 6))].unique().tolist())
+        raise ValueError(f"Unexpected frozen fold IDs outside 1-5: {invalid_folds}.")
     selected["fold"] = numeric_folds.astype(int)
     folds_per_model = selected.groupby("sanger_model_id")["fold"].nunique()
     if folds_per_model.gt(1).any():
@@ -232,10 +232,10 @@ def main(
         responses, crosswalk, sample_labels, gene_ids, expression
     )
     found_folds = sorted(pairs["fold"].unique().tolist())
-    if found_folds != list(range(5)):
+    if found_folds != list(range(1, 6)):
         raise ValueError(
             "The complete matched real-data benchmark must contain all five "
-            f"frozen folds 0-4; found {found_folds}."
+            f"frozen folds 1-5; found {found_folds}."
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
