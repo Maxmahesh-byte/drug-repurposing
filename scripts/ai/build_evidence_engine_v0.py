@@ -452,13 +452,11 @@ def main():
             "value": gdsc_stats["duplicate_curve_id_rows"],
         },
         "gdsc_result_id_cardinality": {
-            "status": "INFO",
+            "status": "REVIEW" if gdsc_stats["unique_result_ids"] == 1 else "INFO",
             "value": gdsc_stats["unique_result_ids"],
-            "note": (
-                "In this GDSC2 release, NLME_RESULT_ID is shared across "
+            "note": "In this GDSC2 release, NLME_RESULT_ID is shared across "
                 "curves; NLME_CURVE_ID is unique per curve. "
-                "Missing and duplicate curve IDs are checked separately."
-            ),
+                "Missing and duplicate curve IDs are checked separately.",
         },
         "chembl_source_url_coverage": {
             "status": "PASS" if chembl_stats["missing_source_url"] == 0 else "REVIEW",

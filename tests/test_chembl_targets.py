@@ -7,6 +7,10 @@ from src.ingestion.chembl_targets import (
     select_exact_synonym_molecules,
 )
 from src.preprocessing.build_graph import _add_chembl_target_edges
+from src.preprocessing.build_graph import (
+    _add_chembl_target_edges,
+    _edge_provenance_records,
+)
 
 
 def test_molecule_resolution_requires_exact_preferred_name():
@@ -67,6 +71,9 @@ def test_graph_preserves_exact_chembl_mechanism_provenance():
                 "target_type": "SINGLE PROTEIN",
                 "uniprot_accession": "Q13547",
                 "gene_symbol": "HDAC1",
+                "drug_match_method": "exact_synonym",
+                "matched_chembl_synonym": "vorinostat",
+                "chembl_synonym_type": "INN",
                 "mechanism_of_action": "Histone deacetylase 1 inhibitor",
                 "action_type": "INHIBITOR",
                 "direct_interaction": True,
@@ -87,3 +94,21 @@ def test_graph_preserves_exact_chembl_mechanism_provenance():
     assert mechanism["relation"] == "chembl_direct_mechanism"
     assert mechanism["mechanism_of_action"] == "Histone deacetylase 1 inhibitor"
     assert graph[target]["HDAC1"]["relation"] == "has_chembl_gene_symbol"
+    mapping = graph[gdsc_drug][molecule]
+    assert mapping["drug_match_method"] == "exact_synonym"
+    assert mapping["matched_chembl_synonym"] == "vorinostat"
+    assert mapping["chembl_synonym_type"] == "INN"
+    assert mapping["provenance_state"] == (
+        "exact_string_match_not_chemical_equivalence"
+    )
+    assert mapping["mapping_source_url"].endswith(
+        "/molecule/CHEMBL98.json"
+    )
+
+    edge_records = _edge_provenance_records(list(graph.edges(data=True)))
+    mapping_record = next(
+        record
+        for record in edge_records
+        if record.get("relation") == "exact_name_chembl_mapping"
+    )
+    assert mapping_record["source"] if "source" in mapping_record else True

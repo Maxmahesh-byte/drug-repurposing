@@ -1,0 +1,12 @@
+ctrp_cell_name,ctrp_auc,cellosaurus_id,sanger_model_id,cellosaurus_record_url,expression_label,proteasome_expression_score,match_method
+CHP126,12.294,CVCL_1123,SIDM00286,https://www.cellosaurus.org/CVCL_1123,"CHP-126, neuroblastoma",-0.36372420795006905,shared_Cellosaurus_accession
+IMR32,10.361,CVCL_0346,SIDM00226,https://www.cellosaurus.org/CVCL_0346,"IMR-32, neuroblastoma",-0.23295829456756523,shared_Cellosaurus_accession
+KELLY,9.5656,CVCL_2092,SIDM01009,https://www.cellosaurus.org/CVCL_2092,"KELLY, neuroblastoma",-0.07262602409373853,shared_Cellosaurus_accession
+KPNSI9S,10.947,CVCL_1340,SIDM00016,https://www.cellosaurus.org/CVCL_1340,"KP-N-SI9s, neuroblastoma",-0.04550499414908109,shared_Cellosaurus_accession
+KPNYN,14.568,CVCL_1341,SIDM00556,https://www.cellosaurus.org/CVCL_1341,"KP-N-YN, neuroblastoma",-0.5391746255688585,shared_Cellosaurus_accession
+MHHNB11,11.406,CVCL_1412,SIDM00387,https://www.cellosaurus.org/CVCL_1412,"MHH-NB-11, neuroblastoma",-1.1024637833809934,shared_Cellosaurus_accession
+NB1,11.553,CVCL_1440,SIDM00578,https://www.cellosaurus.org/CVCL_1440,"NB-1, neuroblastoma",0.639370647730369,shared_Cellosaurus_accession
+SIMA,10.917,CVCL_1695,SIDM00395,https://www.cellosaurus.org/CVCL_1695,"SIMA, neuroblastoma",-0.6083290091298854,shared_Cellosaurus_accession
+SKNBE2,12.432,CVCL_0528,SIDM00894,https://www.cellosaurus.org/CVCL_0528,"SK-N-BE(2), neuroblastoma",-0.40831478848777103,shared_Cellosaurus_accession
+SKNFI,10.941,CVCL_1702,SIDM01099,https://www.cellosaurus.org/CVCL_1702,"SK-N-FI, neuroblastoma",0.07989816034276714,shared_Cellosaurus_accession
+SKNSH,9.6885,CVCL_0531,SIDM01098,https://www.cellosaurus.org/CVCL_0531,"SK-N-SH, neuroblastoma",0.26696035245202454,shared_Cellosaurus_accession

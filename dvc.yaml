@@ -3,22 +3,40 @@ stages:
     cmd: python src/ingestion/data_ingest.py
     deps:
       - src/ingestion/data_ingest.py
+      - src/ingestion/openpedcan.py
+      - src/ingestion/openpedcan_molecular.py
+      - src/ingestion/openpedcan_additional.py
+      - src/ingestion/gdsc2.py
+      - src/ingestion/chembl_targets.py
+      - src/utils/config.py
+      - data/raw/gdsc/GDSC2_fitted_dose_response_27Oct23.xlsx
+      - data/raw/openpedcan/v15/histologies.tsv
+      - data/raw/openpedcan/v15/snv-consensus-plus-hotspots.maf.tsv.gz
+      - data/raw/openpedcan/v15/consensus_wgs_plus_cnvkit_wxs_plus_freec_tumor_only.tsv.gz
+      - data/raw/openpedcan/v15/fusion-putative-oncogenic.tsv
     outs:
-      - data/raw
+      - data/raw/openpedcan/openpedcan_phase1.csv
+      - data/raw/openpedcan/openpedcan_manifest.json
+      - data/raw/openpedcan/openpedcan_mutations_phase2.csv
+      - data/raw/openpedcan/openpedcan_mutations_manifest.json
+      - data/raw/openpedcan/openpedcan_copy_number_phase3.csv
+      - data/raw/openpedcan/openpedcan_copy_number_manifest.json
+      - data/raw/openpedcan/openpedcan_fusions_phase4.csv
+      - data/raw/openpedcan/openpedcan_fusions_manifest.json
+      - data/raw/gdsc/gdsc2_responses.csv
+      - data/raw/gdsc/gdsc2_manifest.json
+      - data/raw/chembl/gdsc2_chembl_target_evidence.csv
+      - data/raw/chembl/gdsc2_chembl_manifest.json
 
   build_graph:
     cmd: python src/preprocessing/build_graph.py
     deps:
-      - data/raw
+      - data/raw/openpedcan/openpedcan_phase1.csv
+      - data/raw/openpedcan/openpedcan_mutations_phase2.csv
+      - data/raw/openpedcan/openpedcan_copy_number_phase3.csv
+      - data/raw/openpedcan/openpedcan_fusions_phase4.csv
+      - data/raw/gdsc/gdsc2_responses.csv
+      - data/raw/chembl/gdsc2_chembl_target_evidence.csv
       - src/preprocessing/build_graph.py
     outs:
-      - data/processed/graph.pt
-
-  train:
-    cmd: python src/training/train_gnn.py
-    deps:
-      - data/processed/graph.pt
-      - src/training/train_gnn.py
-    outs:
-      - artifacts/model.pt
-      - artifacts/metrics.json
+      - data/processed/openpedcan_graph.pt

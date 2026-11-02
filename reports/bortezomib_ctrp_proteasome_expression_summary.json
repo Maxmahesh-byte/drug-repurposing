@@ -1,0 +1,52 @@
+{
+  "analysis": "Exploratory external-response test of the prespecified 38-gene score",
+  "response_source": {
+    "dataset": "Broad Cancer Therapeutics Response Portal (CTRP)",
+    "portal_url": "https://portals.broadinstitute.org/ctrp.v2/",
+    "points_endpoint": "https://portals.broadinstitute.org/ctrp.v2/rest/aucCorrelationPoints/",
+    "compound_id": 411737,
+    "compound_name": "Bortezomib",
+    "response_metric": "CTRP cpdAUC; not directly comparable in scale to GDSC2 AUC",
+    "response_gene_independence_check": [
+      "PSMA1",
+      "ACTB"
+    ],
+    "auc_maps_identical_for_features": true,
+    "site_filter": "autonomic_ganglia"
+  },
+  "expression_source": {
+    "study": "E-MTAB-2770",
+    "download_url": "https://www.ebi.ac.uk/gxa/experiments-content/E-MTAB-2770/resources/ExperimentDownloadSupplier.RnaSeqBaseline/tpmss.tsv",
+    "transform": "log2(TPM + 1), gene-wise z-score across all 1,019 samples",
+    "score": "unweighted mean of the 38 gene-wise z-scores",
+    "selected_gene_rows_sha256": "3a1d4e68fd889c0c1d90c8f28a969b56287943cc6ba70b5e17824f3833f8a155"
+  },
+  "identity_crosswalk": {
+    "source": "Audited Cellosaurus records",
+    "record_base_url": "https://www.cellosaurus.org/",
+    "join_key": "shared Cellosaurus accession",
+    "stable_model_id": "Sanger Cell Model Passport ID recorded by Cellosaurus",
+    "CTRP_neuroblastoma_response_models": 12,
+    "expression_neuroblastoma_samples": 15,
+    "stable_id_matched_models": 11,
+    "unmatched_ctrp_models": [
+      "NH6"
+    ],
+    "model_level_output": "reports/bortezomib_ctrp_proteasome_expression_models.csv"
+  },
+  "primary_test": {
+    "test": "two-sided Spearman rank correlation",
+    "n_models": 11,
+    "rho": -0.33636363636363636,
+    "two_sided_p_value": 0.31182431390038634,
+    "bootstrap_95_percentile_ci": [
+      -0.8309859154929577,
+      0.30805687203791465
+    ],
+    "bootstrap_iterations": 20000,
+    "bootstrap_valid_iterations": 20000,
+    "bootstrap_seed": 20261102,
+    "inferential_status": "exploratory and underpowered; not confirmatory or clinically predictive"
+  },
+  "interpretation": "This is an exploratory association using an independent drug-response screen but the same CCLE expression cohort. The small Neuroblastoma sample cannot confirm a biomarker or support clinical inference."
+}

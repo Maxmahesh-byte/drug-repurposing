@@ -1,10 +1,18 @@
+import json
+import os
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GraphSAGE
 from torch_geometric.data import Data
+from torch_geometric.nn import GraphSAGE
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.utils.config import CONFIG
-import os
-import json
 
 class SimpleGNN(torch.nn.Module):
     def __init__(self, num_features=32, hidden_dim=CONFIG["hidden_dim"]):
@@ -16,22 +24,29 @@ class SimpleGNN(torch.nn.Module):
         x = self.sage(x, edge_index)
         return self.lin(x).squeeze()
 
-def train_gnn():
-    print("🚀 Starting GNN training on real GDSC knowledge graph...")
+def train_gnn(graph_path: str | Path = "data/processed/openpedcan_graph.pt"):
+    print("Starting GNN training with validated real response labels...")
+    graph = torch.load(graph_path, weights_only=False)
+    if "y" not in graph or "train_mask" not in graph:
+        raise ValueError(
+            "Training requires real graph.y response labels and graph.train_mask; "
+            "the current OpenPedCan graph has no drug-response supervision."
+        )
 
-    # Load the graph
-    graph = torch.load("data/processed/graph.pt", weights_only=False)
+    target = graph.y.float().view(-1)
+    train_mask = graph.train_mask.bool().view(-1)
+    if target.numel() != graph.num_nodes or train_mask.numel() != graph.num_nodes:
+        raise ValueError("Real target labels and train_mask must contain one entry per graph node")
+    if not train_mask.any() or not torch.isfinite(target[train_mask]).all():
+        raise ValueError("Training requires at least one finite real response label")
 
-    model = SimpleGNN()
+    model = SimpleGNN(num_features=graph.num_node_features)
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
 
     for epoch in range(CONFIG["num_epochs"]):
         optimizer.zero_grad()
         out = model(graph.x, graph.edge_index)
-        
-        # FIXED: Use dynamic target size based on actual graph size
-        target = torch.randn(graph.num_nodes)
-        loss = F.mse_loss(out.squeeze(), target)
+        loss = F.mse_loss(out.view(-1)[train_mask], target[train_mask])
 
         loss.backward()
         optimizer.step()
@@ -46,7 +61,11 @@ def train_gnn():
     print(f"✅ GNN model saved to {model_path}")
 
     # Save simple metrics
-    metrics = {"final_loss": float(loss.item()), "epochs": CONFIG["num_epochs"]}
+    metrics = {
+        "final_loss": float(loss.item()),
+        "epochs": CONFIG["num_epochs"],
+        "training_examples": int(train_mask.sum().item()),
+    }
     with open(f"{CONFIG['artifacts_path']}metrics.json", "w") as f:
         json.dump(metrics, f)
 

@@ -7,6 +7,7 @@ class RepurposingRequest(BaseModel):
 class RepurposingResponse(BaseModel):
     drug_id: str
     target_disease: str
-    repurposing_score: float
+    available: bool
+    repurposing_score: float | None
     confidence: str
     explanation: str

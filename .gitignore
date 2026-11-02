@@ -6,3 +6,8 @@ artifacts/
 *.pt
 .env
 .DS_Store
+
+# Local environment and generated evidence data
+.venv/
+/data/raw/
+/data/ai/
