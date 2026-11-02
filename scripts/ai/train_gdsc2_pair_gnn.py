@@ -319,6 +319,64 @@ def main(args) -> dict:
     oof_path = output_dir / "gdsc2_pair_gnn_oof_predictions.csv"
     metrics_path = output_dir / "gdsc2_pair_gnn_metrics.json"
     oof.to_csv(oof_path, index=False)
+
+    # Fair baseline comparison on the exact same matched curve IDs and frozen folds.
+    baseline_dir = ROOT / "data/ai/baselines"
+    baseline_comparison = {}
+    baseline_specs = {
+        "ln_ic50": (
+            baseline_dir / "gdsc2_ln_ic50_oof_predictions.csv",
+            "actual_ln_ic50",
+            "B2_drug_cancer_median",
+            "pred_ln_ic50",
+        ),
+        "auc": (
+            baseline_dir / "gdsc2_auc_oof_predictions.csv",
+            "actual_auc",
+            "B2_drug_cancer_median",
+            "pred_auc",
+        ),
+    }
+    for endpoint, (baseline_path, actual_col, baseline_col, gnn_col) in baseline_specs.items():
+        if not baseline_path.is_file():
+            baseline_comparison[endpoint] = {
+                "status": "baseline_file_missing",
+                "expected_path": str(baseline_path),
+            }
+            continue
+        baseline = pd.read_csv(baseline_path, dtype={"curve_id": str})
+        if baseline["curve_id"].duplicated().any():
+            raise ValueError(f"Duplicate curve IDs in baseline file: {baseline_path}")
+        matched = oof[["curve_id", "fold", gnn_col]].merge(
+            baseline[["curve_id", "fold", actual_col, baseline_col]],
+            on="curve_id",
+            how="inner",
+            validate="one_to_one",
+            suffixes=("_gnn", "_baseline"),
+        )
+        if len(matched) != len(oof):
+            raise ValueError(
+                f"Baseline {endpoint} overlap {len(matched)} does not equal "
+                f"GNN OOF rows {len(oof)}; cannot claim same-row comparison."
+            )
+        if not np.array_equal(
+            matched["fold_gnn"].to_numpy(), matched["fold_baseline"].to_numpy()
+        ):
+            raise ValueError(f"Frozen fold assignments differ in {endpoint} baseline.")
+        actual = matched[actual_col].to_numpy(dtype=float)
+        baseline_pred = matched[baseline_col].to_numpy(dtype=float)
+        gnn_pred = matched[gnn_col].to_numpy(dtype=float)
+        baseline_comparison[endpoint] = {
+            "same_curve_ids": int(len(matched)),
+            "frozen_fold_assignments_identical": True,
+            "drug_cancer_median_baseline": metric_block(actual, baseline_pred),
+            "pair_gnn": metric_block(actual, gnn_pred),
+            "mae_difference_gnn_minus_baseline": float(
+                mean_absolute_error(actual, gnn_pred)
+                - mean_absolute_error(actual, baseline_pred)
+            ),
+        }
+
     summary = {
         "status": "trained_and_evaluated",
         "model": "drug-side RGCN evidence encoder + fold-specific cell-line expression MLP + pairwise dual-endpoint head",
@@ -335,6 +393,7 @@ def main(args) -> dict:
             "bidirectional_message_passing_relations": compact_graph.num_relations,
         },
         "fold_metrics": fold_metrics,
+        "same_row_baseline_comparison": baseline_comparison,
         "overall": {
             endpoint: metric_block(
                 oof[f"actual_{endpoint}"].to_numpy() if f"actual_{endpoint}" in oof else oof[endpoint].to_numpy(),
