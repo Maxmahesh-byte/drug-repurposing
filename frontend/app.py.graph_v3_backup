@@ -1,0 +1,34 @@
+import json
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+st.title("Pediatric Cancer Evidence")
+st.caption("OpenPedCan clinical and consensus mutation evidence")
+
+data_dir = Path("data/raw/openpedcan")
+clinical_path = data_dir / "openpedcan_phase1.csv"
+mutation_path = data_dir / "openpedcan_mutations_phase2.csv"
+mutation_manifest_path = data_dir / "openpedcan_mutations_manifest.json"
+
+if clinical_path.is_file() and mutation_path.is_file() and mutation_manifest_path.is_file():
+    clinical = pd.read_csv(clinical_path, usecols=["sample_id", "cohort", "tumor_type", "diagnosis"])
+    mutation_manifest = json.loads(mutation_manifest_path.read_text())
+    mutations = pd.read_csv(
+        mutation_path,
+        usecols=["sample_id", "gene_symbol", "variant_classification", "variant_type", "impact"],
+        nrows=25,
+    )
+    first, second, third = st.columns(3)
+    first.metric("Clinical biospecimens", clinical["sample_id"].nunique())
+    second.metric("Matched variant records", mutation_manifest["variant_rows_matched"])
+    third.metric("Mutated biospecimens", mutation_manifest["unique_biospecimens_matched"])
+    st.dataframe(mutations, use_container_width=True, hide_index=True)
+else:
+    st.warning("Run real OpenPedCan clinical and mutation ingestion to populate this evidence view.")
+
+st.info(
+    "Drug-repurposing scores are unavailable until verified drug-response labels and a "
+    "validated drug-disease prediction task are integrated."
+)

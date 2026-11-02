@@ -1,0 +1,309 @@
+import json
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.inference.intergenic_evidence import get_sample_intergenic_evidence
+
+import pandas as pd
+import streamlit as st
+
+st.title("Pediatric Cancer Evidence")
+st.caption("OpenPedCan clinical and consensus mutation evidence")
+
+data_dir = Path("data/raw/openpedcan")
+clinical_path = data_dir / "openpedcan_phase1.csv"
+mutation_path = data_dir / "openpedcan_mutations_phase2.csv"
+mutation_manifest_path = data_dir / "openpedcan_mutations_manifest.json"
+
+if clinical_path.is_file() and mutation_path.is_file() and mutation_manifest_path.is_file():
+    clinical = pd.read_csv(clinical_path, usecols=["sample_id", "cohort", "tumor_type", "diagnosis"])
+    mutation_manifest = json.loads(mutation_manifest_path.read_text())
+    mutations = pd.read_csv(
+        mutation_path,
+        usecols=["sample_id", "gene_symbol", "variant_classification", "variant_type", "impact"],
+        nrows=25,
+    )
+    first, second, third = st.columns(3)
+    first.metric("Clinical biospecimens", clinical["sample_id"].nunique())
+    second.metric("Matched variant records", mutation_manifest["variant_rows_matched"])
+    third.metric("Mutated biospecimens", mutation_manifest["unique_biospecimens_matched"])
+    st.dataframe(mutations, use_container_width=True, hide_index=True)
+else:
+    st.warning("Run real OpenPedCan clinical and mutation ingestion to populate this evidence view.")
+
+st.info(
+    "Drug-repurposing scores are unavailable until verified drug-response labels and a "
+    "validated drug-disease prediction task are integrated."
+)
+
+
+# GRAPH V3 READ-ONLY STATUS PANEL
+st.divider()
+st.subheader("Graph V3 — integrated intergenic evidence")
+
+graph_v3_manifest_path = (
+    Path("data/processed/graph_v3") / "graph_v3_manifest.json"
+)
+
+if graph_v3_manifest_path.is_file():
+    try:
+        graph_v3_manifest = json.loads(
+            graph_v3_manifest_path.read_text(encoding="utf-8")
+        )
+
+        graph_v3_file = Path(
+            graph_v3_manifest.get(
+                "output_graph",
+                "data/processed/graph_v3/typed_graph_v3.pt",
+            )
+        )
+        if not graph_v3_file.is_absolute():
+            graph_v3_file = Path.cwd() / graph_v3_file
+
+        source_evidence_value = graph_v3_manifest.get(
+            "source_evidence_extract"
+        )
+        source_evidence_file = (
+            Path(source_evidence_value)
+            if source_evidence_value else None
+        )
+        if (
+            source_evidence_file is not None
+            and not source_evidence_file.is_absolute()
+        ):
+            source_evidence_file = Path.cwd() / source_evidence_file
+
+        graph_v3_exists = graph_v3_file.is_file()
+        source_evidence_exists = (
+            source_evidence_file is not None
+            and source_evidence_file.is_file()
+        )
+
+        graph_v3_validation = graph_v3_manifest.get(
+            "validation", {}
+        )
+        graph_v3_validation_passed = (
+            isinstance(graph_v3_validation, dict)
+            and bool(graph_v3_validation)
+            and all(
+                value is True
+                for value in graph_v3_validation.values()
+            )
+        )
+
+        graph_v3_ready = (
+            graph_v3_exists
+            and source_evidence_exists
+            and graph_v3_validation_passed
+        )
+
+        metric_a, metric_b, metric_c, metric_d = st.columns(4)
+        metric_a.metric(
+            "Intergenic observations",
+            f"{graph_v3_manifest.get('new_node_count', 0):,}",
+        )
+        metric_b.metric(
+            "Matched samples",
+            f"{graph_v3_manifest.get('sample_nodes_matched', 0):,}",
+        )
+        metric_c.metric(
+            "New graph relations",
+            f"{graph_v3_manifest.get('new_edge_count', 0):,}",
+        )
+        metric_d.metric(
+            "Graph version",
+            str(graph_v3_manifest.get("schema_version", "Unknown")),
+        )
+
+        if graph_v3_ready:
+            st.success(
+                "Graph V3 artifact and evidence extract are present. "
+                "All validation flags recorded in the manifest are true."
+            )
+        else:
+            st.warning(
+                "Graph V3 is incomplete: check the graph file, source "
+                "evidence file, and manifest validation flags."
+            )
+
+        st.caption(
+            "Genome build: "
+            f"{graph_v3_manifest.get('coordinate_reference', 'Not recorded')}"
+            " · Coordinate convention: "
+            f"{graph_v3_manifest.get('coordinate_convention', 'Not recorded')}"
+        )
+
+        with st.expander("Graph V3 provenance and structure"):
+            st.write(
+                "**Graph artifact:**",
+                str(graph_v3_file),
+            )
+            st.write(
+                "**Source evidence extract:**",
+                str(source_evidence_file)
+                if source_evidence_file else "Not recorded",
+            )
+            st.write(
+                "**New node type:**",
+                graph_v3_manifest.get("new_node_type"),
+            )
+            st.write(
+                "**New relation:**",
+                " → ".join(
+                    graph_v3_manifest.get("new_edge_type", [])
+                ),
+            )
+            st.write(
+                "**Existing node types preserved:**",
+                len(
+                    graph_v3_manifest.get(
+                        "original_node_counts_preserved", {}
+                    )
+                ),
+            )
+            st.write(
+                "**Existing edge types preserved:**",
+                len(
+                    graph_v3_manifest.get(
+                        "original_edge_counts_preserved", {}
+                    )
+                ),
+            )
+
+            node_counts = graph_v3_manifest.get(
+                "original_node_counts_preserved", {}
+            )
+            if node_counts:
+                st.markdown("**Existing node counts**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Node type": name, "Count": count}
+                            for name, count in node_counts.items()
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            edge_counts = graph_v3_manifest.get(
+                "original_edge_counts_preserved", {}
+            )
+            if edge_counts:
+                st.markdown("**Existing relation counts**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Relation": name, "Count": count}
+                            for name, count in edge_counts.items()
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**Recorded build validation**")
+            st.json(graph_v3_validation)
+
+        st.caption(
+            "This panel reads the manifest and checks file presence. "
+            "It does not load the full graph tensor or independently "
+            "revalidate millions of records on each page refresh."
+        )
+
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        st.error(f"Could not read Graph V3 manifest: {exc}")
+else:
+    st.warning(
+        "Graph V3 manifest not found. Build and validate Graph V3 "
+        "before displaying its status."
+    )
+
+
+
+# SAMPLE-LEVEL INTERGENIC EVIDENCE EXPLORER
+st.divider()
+st.subheader("Explore intergenic evidence by sample")
+
+st.caption(
+    "Search by OpenPedCan sample barcode. Results are paginated "
+    "and preserve the source MAF row identifier."
+)
+
+with st.form("intergenic_sample_lookup"):
+    lookup_sample_id = st.text_input(
+        "Sample barcode",
+        placeholder="Enter a sample barcode",
+        max_chars=128,
+    )
+    lookup_page_size = st.selectbox(
+        "Observations per page",
+        options=[25, 50, 100, 200],
+        index=1,
+    )
+    lookup_offset = st.number_input(
+        "Offset",
+        min_value=0,
+        max_value=10_000_000,
+        value=0,
+        step=50,
+    )
+    lookup_submitted = st.form_submit_button(
+        "Search sample evidence"
+    )
+
+if lookup_submitted:
+    if not lookup_sample_id.strip():
+        st.warning("Enter a sample barcode.")
+    else:
+        try:
+            result = get_sample_intergenic_evidence(
+                sample_id=lookup_sample_id,
+                limit=int(lookup_page_size),
+                offset=int(lookup_offset),
+            )
+
+            st.metric(
+                "Intergenic observations for this sample",
+                f"{result['total_count']:,}",
+            )
+
+            st.caption(
+                f"Showing {result['returned_count']:,} records "
+                f"starting at offset {result['offset']:,}."
+            )
+
+            if result["items"]:
+                evidence_frame = pd.DataFrame(result["items"])
+                st.dataframe(
+                    evidence_frame,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "No records at this offset. Try a lower offset."
+                )
+
+            if result["next_offset"] is not None:
+                st.info(
+                    f"More records are available. Set Offset to "
+                    f"{result['next_offset']:,} to see the next page."
+                )
+            else:
+                st.caption("End of sample results.")
+
+            st.caption(
+                "Coordinates are GRCh38, 1-based inclusive. "
+                "These records are classified as intergenic (IGR); "
+                "they are not assigned to a gene by this view."
+            )
+
+        except ValueError as exc:
+            st.warning(str(exc))
+        except (FileNotFoundError, RuntimeError) as exc:
+            st.error(f"Evidence index unavailable: {exc}")

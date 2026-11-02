@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import json
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+# Pinned CDN version: 3d-force-graph 1.80.1.
+# The graph is deliberately limited to disease-label context, gene-symbol
+# observation summaries, and their source lineage. It does not display drug
+# candidates, target recommendations, or drug-response comparisons.
+
+
+def _safe_json(value: object) -> str:
+    """Serialize JSON so untrusted text cannot terminate the embedding script."""
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def render_evidence_network_3d(
+    nodes: list[dict],
+    links: list[dict],
+    *,
+    height: int = 760,
+) -> None:
+    """Render a self-contained, interactive 3D evidence-provenance network."""
+    payload = _safe_json({"nodes": nodes, "links": links})
+
+    document = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence Atlas 3D Evidence Network</title>
+<script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.1"></script>
+<style>
+:root {
+  color-scheme: dark;
+  --ink: #e8f1f7;
+  --muted: #91a9ba;
+  --line: rgba(154,190,211,.18);
+  --panel: rgba(11,27,42,.92);
+  --blue: #76a7d9;
+  --teal: #55bba9;
+  --violet: #ad96e8;
+  --amber: #e4b66d;
+}
+* { box-sizing: border-box; }
+html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#071522; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+#stage { position:relative; width:100%; height:100%; min-height:620px; overflow:hidden; background:radial-gradient(ellipse at 48% 46%, #16364b 0%, #0b2032 43%, #071522 78%); }
+#graph { position:absolute; inset:0; }
+#topbar { position:absolute; z-index:5; top:15px; left:16px; right:16px; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; pointer-events:none; }
+.brand { pointer-events:auto; padding:10px 13px; border:1px solid var(--line); border-radius:12px; background:rgba(7,21,34,.72); backdrop-filter:blur(12px); }
+.brand .kicker { font-size:9px; letter-spacing:.19em; text-transform:uppercase; font-weight:800; color:#71c8bb; }
+.brand .title { color:var(--ink); font-size:15px; font-weight:760; margin-top:3px; letter-spacing:-.02em; }
+.brand .sub { color:var(--muted); font-size:9px; margin-top:3px; }
+.controls { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; pointer-events:auto; }
+button { cursor:pointer; border:1px solid rgba(158,192,210,.24); border-radius:9px; padding:8px 10px; background:rgba(13,34,51,.86); color:#dceaf2; font-size:10px; font-weight:700; letter-spacing:.02em; }
+button:hover { background:rgba(34,72,91,.92); border-color:rgba(114,199,187,.5); }
+button.active { border-color:rgba(85,187,169,.7); color:#8ee0d0; background:rgba(31,94,91,.28); }
+#legend { position:absolute; z-index:4; left:17px; bottom:16px; width:min(460px, calc(100% - 350px)); border:1px solid var(--line); border-radius:12px; background:rgba(8,24,38,.82); backdrop-filter:blur(10px); padding:10px 12px; }
+.legend-head { color:#dce8ef; text-transform:uppercase; letter-spacing:.13em; font-size:9px; font-weight:800; margin-bottom:8px; }
+.legend-grid { display:flex; flex-wrap:wrap; gap:8px 14px; }
+.legend-item { display:flex; align-items:center; gap:6px; color:#a9bdcb; font-size:9px; }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; box-shadow:0 0 10px currentColor; }
+.dot.clinical { color:var(--blue); background:var(--blue); }
+.dot.disease { color:var(--amber); background:var(--amber); }
+.dot.summary { color:var(--teal); background:var(--teal); }
+.dot.gene { color:var(--violet); background:var(--violet); }
+#sidepanel { position:absolute; z-index:5; top:82px; right:16px; width:270px; max-height:calc(100% - 180px); overflow:auto; border:1px solid rgba(151,188,208,.22); border-radius:15px; background:var(--panel); backdrop-filter:blur(14px); box-shadow:0 16px 42px rgba(0,0,0,.28); padding:15px; }
+.panel-kicker { color:#76c8bb; text-transform:uppercase; letter-spacing:.16em; font-size:9px; font-weight:850; }
+.panel-title { color:#f1f6f9; font-size:17px; line-height:1.2; letter-spacing:-.035em; font-weight:760; margin:7px 0 5px; overflow-wrap:anywhere; }
+.panel-type { display:inline-flex; border:1px solid rgba(118,167,217,.35); color:#a9c8e5; background:rgba(75,119,158,.15); padding:4px 7px; border-radius:999px; font-size:9px; font-weight:750; }
+.panel-detail { color:#a8bac8; font-size:10px; line-height:1.55; margin-top:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.panel-source { border-top:1px solid var(--line); margin-top:12px; padding-top:10px; color:#7895a9; font-size:9px; line-height:1.5; }
+.panel-help { margin-top:13px; border-left:2px solid var(--amber); padding:8px 9px; background:rgba(148,101,37,.11); color:#c6ae87; font-size:9px; line-height:1.5; }
+#status { position:absolute; z-index:4; left:17px; top:90px; color:#87a2b5; font-size:9px; letter-spacing:.04em; background:rgba(7,21,34,.48); border:1px solid rgba(154,190,211,.12); border-radius:8px; padding:7px 9px; }
+#loaderror { display:none; position:absolute; z-index:10; inset:25% 12%; align-items:center; justify-content:center; text-align:center; color:#f3d7a5; background:#102638; border:1px solid rgba(228,182,109,.35); border-radius:15px; padding:22px; font-size:12px; line-height:1.6; }
+@media(max-width:740px) { #sidepanel { width:220px; right:10px; top:76px; } #legend { width:calc(100% - 20px); left:10px; bottom:10px; } .brand .sub { display:none; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="graph"></div>
+  <div id="topbar">
+    <div class="brand">
+      <div class="kicker">Evidence Atlas · Provenance Network</div>
+      <div class="title">Disease-context evidence universe</div>
+      <div class="sub">Aggregated tumour labels · gene-symbol observations · source lineage</div>
+    </div>
+    <div class="controls">
+      <button id="orbit" class="active" type="button">Auto orbit: on</button>
+      <button id="fit" type="button">Fit network</button>
+      <button id="reset" type="button">Reset view</button>
+    </div>
+  </div>
+  <div id="status">Drag to rotate · Scroll to zoom · Click a node to inspect</div>
+  <aside id="sidepanel">
+    <div class="panel-kicker">Selected evidence entity</div>
+    <div id="detail-title" class="panel-title">Explore the network</div>
+    <span id="detail-type" class="panel-type">3D evidence view</span>
+    <div id="detail-text" class="panel-detail">Select the tumour label, a source dataset or a gene-symbol node to inspect its role in this evidence view.</div>
+    <div id="detail-source" class="panel-source">Sources remain distinct. Connections describe dataset organisation and aggregated observations.</div>
+    <div class="panel-help">An aggregated gene-symbol observation count is not evidence of gene dependency, biological mechanism, treatment response or clinical efficacy.</div>
+  </aside>
+  <div id="legend">
+    <div class="legend-head">Entity types</div>
+    <div class="legend-grid">
+      <span class="legend-item"><i class="dot clinical"></i>Clinical metadata</span>
+      <span class="legend-item"><i class="dot disease"></i>Tumour label</span>
+      <span class="legend-item"><i class="dot summary"></i>Observation summary</span>
+      <span class="legend-item"><i class="dot gene"></i>Gene symbol</span>
+    </div>
+  </div>
+  <div id="loaderror">The 3D renderer could not load. Check that this browser has WebGL enabled and can reach jsDelivr, then reload the Streamlit page.</div>
+</div>
+<script>
+const DATA = __GRAPH_DATA__;
+const edgeColors = {
+  context: '#76a7d9',
+  summary: '#55bba9',
+  observation: '#ad96e8',
+  provenance: '#e4b66d'
+};
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const errorBox = document.getElementById('loaderror');
+if (!window.ForceGraph3D) {
+  errorBox.style.display = 'flex';
+} else {
+  const graphEl = document.getElementById('graph');
+  let focusedId = null;
+  let neighbourIds = new Set();
+  let autoOrbit = true;
+  const baseNodes = DATA.nodes.map(n => ({...n}));
+  const baseLinks = DATA.links.map(l => ({...l}));
+  const enabled = {context:true, summary:true, observation:true, provenance:true};
+
+  const Graph = ForceGraph3D(graphEl, { controlType: 'orbit' })
+    .graphData({nodes: baseNodes, links: baseLinks.map(l => ({...l, source:l.source, target:l.target}))})
+    .backgroundColor('#071522')
+    .showNavInfo(false)
+    .nodeId('id')
+    .nodeLabel(node => `<div style="font-family:Inter,Arial;padding:7px 9px;max-width:250px"><b>${esc(node.label)}</b><br><span style="color:#9cb6c8">${esc(node.kind)}</span><br><span style="color:#b5c8d4">${esc(node.detail)}</span></div>`)
+    .nodeColor(node => {
+      if (!focusedId) return node.color;
+      if (node.id === focusedId) return '#ffffff';
+      return neighbourIds.has(node.id) ? node.color : '#203547';
+    })
+    .nodeVal(node => node.value || 4)
+    .nodeRelSize(5.5)
+    .nodeResolution(16)
+    .nodeOpacity(0.96)
+    .linkColor(link => {
+      if (!focusedId) return edgeColors[link.kind] || '#71889a';
+      const sid = typeof link.source === 'object' ? link.source.id : link.source;
+      const tid = typeof link.target === 'object' ? link.target.id : link.target;
+      return (sid === focusedId || tid === focusedId) ? (edgeColors[link.kind] || '#71889a') : 'rgba(90,112,128,.10)';
+    })
+    .linkWidth(link => link.kind === 'observation' ? 1.8 : 1.25)
+    .linkOpacity(0.78)
+    .linkDirectionalParticles(link => link.kind === 'observation' ? 2 : 1)
+    .linkDirectionalParticleWidth(1.8)
+    .linkDirectionalParticleSpeed(0.0035)
+    .linkDirectionalParticleColor(link => edgeColors[link.kind] || '#a4b8c6')
+    .linkLabel(link => `<div style="font-family:Inter,Arial;padding:7px 9px"><b>${esc(link.label || 'Evidence relationship')}</b><br><span style="color:#b5c8d4">${esc(link.detail || '')}</span></div>`)
+    .onNodeClick(node => {
+      focusedId = node.id;
+      neighbourIds = new Set();
+      baseLinks.forEach(link => {
+        if (link.source === node.id) neighbourIds.add(link.target);
+        if (link.target === node.id) neighbourIds.add(link.source);
+      });
+      document.getElementById('detail-title').textContent = node.label;
+      document.getElementById('detail-type').textContent = node.kind;
+      document.getElementById('detail-text').textContent = node.detail || 'No further detail supplied.';
+      document.getElementById('detail-source').textContent = 'Source: ' + (node.source || 'Not specified');
+      Graph.nodeColor(Graph.nodeColor());
+      Graph.linkColor(Graph.linkColor());
+      const distance = 170;
+      const length = Math.hypot(node.x || 0, node.y || 0, node.z || 0) || 1;
+      const ratio = 1 + distance / length;
+      Graph.cameraPosition(
+        {x:(node.x || 0)*ratio, y:(node.y || 0)*ratio, z:(node.z || 0)*ratio},
+        node,
+        900
+      );
+    })
+    .onLinkClick(link => {
+      const source = typeof link.source === 'object' ? link.source.label : link.source;
+      const target = typeof link.target === 'object' ? link.target.label : link.target;
+      document.getElementById('detail-title').textContent = link.label || 'Evidence relationship';
+      document.getElementById('detail-type').textContent = 'Relationship · ' + link.kind;
+      document.getElementById('detail-text').textContent = `${source} → ${target}\n\n${link.detail || ''}`;
+      document.getElementById('detail-source').textContent = 'Relationship semantics are descriptive and source-defined.';
+    });
+
+  Graph.d3Force('charge').strength(-165);
+  Graph.d3Force('link').distance(link => link.kind === 'context' ? 185 : 115);
+  Graph.d3VelocityDecay(0.34);
+  Graph.warmupTicks(90);
+  Graph.cooldownTime(9000);
+  Graph.cameraPosition({x:0,y:0,z:620}, {x:0,y:0,z:0}, 0);
+  Graph.controls().autoRotate = true;
+  Graph.controls().autoRotateSpeed = 0.22;
+
+  function refreshLinks() {
+    const filtered = baseLinks.filter(link => enabled[link.kind] !== false);
+    Graph.graphData({nodes: baseNodes, links: filtered.map(link => ({...link, source:link.source, target:link.target}))});
+  }
+  document.getElementById('orbit').addEventListener('click', event => {
+    autoOrbit = !autoOrbit;
+    Graph.controls().autoRotate = autoOrbit;
+    event.currentTarget.classList.toggle('active', autoOrbit);
+    event.currentTarget.textContent = 'Auto orbit: ' + (autoOrbit ? 'on' : 'off');
+  });
+  document.getElementById('fit').addEventListener('click', () => Graph.zoomToFit(850, 70));
+  document.getElementById('reset').addEventListener('click', () => {
+    focusedId = null;
+    neighbourIds = new Set();
+    document.getElementById('detail-title').textContent = 'Explore the network';
+    document.getElementById('detail-type').textContent = '3D evidence view';
+    document.getElementById('detail-text').textContent = 'Select the tumour label, a source dataset or a gene-symbol node to inspect its role in this evidence view.';
+    document.getElementById('detail-source').textContent = 'Sources remain distinct. Connections describe dataset organisation and aggregated observations.';
+    Graph.nodeColor(Graph.nodeColor());
+    Graph.linkColor(Graph.linkColor());
+    Graph.cameraPosition({x:0,y:0,z:620}, {x:0,y:0,z:0}, 900);
+  });
+  window.addEventListener('resize', () => Graph.width(graphEl.clientWidth).height(graphEl.clientHeight));
+  setTimeout(() => Graph.zoomToFit(900, 90), 1200);
+}
+</script>
+</body>
+</html>'''
+
+    document = document.replace("__GRAPH_DATA__", payload)
+    if hasattr(st, "iframe"):
+        st.iframe(document, height=height)
+    else:  # Compatibility with older Streamlit versions used by existing installs.
+        components.html(document, height=height, scrolling=False)

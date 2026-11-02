@@ -1,0 +1,350 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+def _safe_json(value: object) -> str:
+    """Serialize data safely for an inline HTML document."""
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def render_evidence_network_3d(
+    nodes: list[dict[str, Any]],
+    links: list[dict[str, Any]],
+    *,
+    title: str,
+    tumour_label: str,
+    stats: dict[str, str],
+    height: int = 850,
+) -> None:
+    """Render a labelled 3D evidence-provenance graph with a readable fallback.
+
+    The graph only visualizes source lineage, selected tumour-label grouping,
+    and descriptive aggregated gene-symbol observations. It does not encode
+    biological causality, dependency, therapeutic response, or efficacy.
+    """
+    payload = _safe_json({
+        "nodes": nodes,
+        "links": links,
+        "title": title,
+        "tumourLabel": tumour_label,
+        "stats": stats,
+    })
+
+    document = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence Atlas · Knowledge Graph</title>
+<script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.1"></script>
+<script src="https://cdn.jsdelivr.net/npm/three-spritetext@1.10.0/dist/three-spritetext.min.js"></script>
+<style>
+:root {
+  color-scheme: dark;
+  --ink:#edf5f8; --muted:#9ab0bf; --line:rgba(169,198,215,.18);
+  --panel:rgba(10,25,39,.96); --teal:#58c6b5; --blue:#79afe1;
+  --violet:#b49aef; --amber:#f1bf73; --red:#df8585;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#081725;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button{cursor:pointer;border:1px solid rgba(158,192,210,.24);border-radius:9px;padding:8px 10px;background:rgba(16,39,57,.94);color:#e2edf3;font-size:10px;font-weight:750;letter-spacing:.02em;transition:.18s ease}
+button:hover{background:#1c4554;border-color:rgba(88,198,181,.62);transform:translateY(-1px)}
+button.active{color:#8be0d0;border-color:rgba(88,198,181,.68);background:rgba(24,104,91,.3)}
+#stage{position:relative;width:100%;height:100%;min-height:760px;overflow:hidden;background:radial-gradient(ellipse at 42% 45%,#193b50 0%,#102b40 34%,#0a1e2e 67%,#081725 100%)}
+#stage:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(86,153,170,.055) 1px,transparent 1px),linear-gradient(rgba(86,153,170,.045) 1px,transparent 1px);background-size:52px 52px;mask-image:linear-gradient(90deg,black,rgba(0,0,0,.5) 75%,transparent)}
+#stage:after{content:"";position:absolute;left:4%;right:30%;top:48%;height:1px;background:linear-gradient(90deg,transparent,rgba(112,180,191,.14),transparent);pointer-events:none}
+#graph{position:absolute;left:0;right:324px;top:132px;bottom:96px;z-index:1}
+#graph canvas{display:block}
+#fallback{display:none;position:absolute;left:0;right:324px;top:132px;bottom:96px;z-index:2;padding:10px}
+#fallback svg{width:100%;height:100%;overflow:visible}
+#topbar{position:absolute;z-index:6;top:13px;left:16px;right:328px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;pointer-events:none}
+.brand{pointer-events:auto;padding:9px 13px;border:1px solid var(--line);border-radius:12px;background:rgba(7,22,35,.75);backdrop-filter:blur(12px);min-width:230px}
+.kicker{font-size:9px;letter-spacing:.2em;text-transform:uppercase;font-weight:850;color:var(--teal)}
+.title{font-size:15px;line-height:1.2;color:var(--ink);font-weight:800;margin-top:4px;letter-spacing:-.025em}
+.sub{font-size:9px;color:#9db4c2;margin-top:4px}
+.controls{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;pointer-events:auto}
+#selection{position:absolute;z-index:5;top:76px;left:16px;right:328px;display:flex;align-items:center;justify-content:space-between;gap:14px;pointer-events:none}
+.selected-chip{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:11px;border:1px solid rgba(241,191,115,.34);background:rgba(54,43,29,.57);backdrop-filter:blur(10px);min-width:0}
+.selected-chip .orb{width:10px;height:10px;border-radius:50%;background:var(--amber);box-shadow:0 0 18px rgba(241,191,115,.75);flex:0 0 auto}
+.selected-chip small{display:block;color:#c5aa82;font-size:8px;text-transform:uppercase;letter-spacing:.15em;font-weight:850}
+.selected-chip strong{display:block;color:#fff1d9;font-size:13px;line-height:1.2;margin-top:2px;overflow-wrap:anywhere}
+.stats{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.stat{border:1px solid rgba(164,195,212,.17);background:rgba(7,22,35,.66);backdrop-filter:blur(10px);border-radius:9px;padding:7px 9px;min-width:93px}
+.stat b{display:block;color:#f0f6f8;font-size:13px;font-weight:800;font-variant-numeric:tabular-nums}
+.stat span{display:block;color:#91a9ba;font-size:8px;letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
+#zones{position:absolute;z-index:3;top:132px;left:14px;right:337px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;pointer-events:none}
+.zone{padding:8px 10px;border-radius:10px;background:linear-gradient(90deg,rgba(7,22,35,.72),rgba(7,22,35,.28));border-top:1px solid rgba(162,194,211,.2);min-width:0}
+.zone b{display:block;color:#dce9ef;font-size:9px;text-transform:uppercase;letter-spacing:.15em;font-weight:850}
+.zone span{display:block;color:#8da7b7;font-size:8px;margin-top:3px;line-height:1.3}
+.zone.cohort{border-top-color:rgba(121,175,225,.8)} .zone.disease{border-top-color:rgba(241,191,115,.85)} .zone.molecular{border-top-color:rgba(180,154,239,.85)}
+#sidepanel{position:absolute;z-index:7;top:14px;right:14px;bottom:14px;width:296px;overflow:auto;border:1px solid rgba(151,188,208,.22);border-radius:16px;background:var(--panel);backdrop-filter:blur(15px);box-shadow:0 18px 46px rgba(0,0,0,.3);padding:15px}
+.panel-kicker{color:var(--teal);text-transform:uppercase;letter-spacing:.17em;font-size:8px;font-weight:900}
+.panel-title{color:#f2f7fa;font-size:19px;line-height:1.15;letter-spacing:-.04em;font-weight:800;margin:8px 0 6px;overflow-wrap:anywhere}
+.panel-type{display:inline-flex;border:1px solid rgba(121,175,225,.35);color:#b6d3ed;background:rgba(75,119,158,.15);padding:4px 7px;border-radius:999px;font-size:8px;font-weight:800}
+.panel-detail{color:#b0c2ce;font-size:10px;line-height:1.62;margin-top:13px;white-space:pre-wrap;overflow-wrap:anywhere}
+.panel-source{border-top:1px solid var(--line);margin-top:14px;padding-top:11px;color:#90a9ba;font-size:9px;line-height:1.55;overflow-wrap:anywhere}
+.panel-source b{display:block;color:#d3e0e7;text-transform:uppercase;font-size:8px;letter-spacing:.13em;margin-bottom:5px}
+.panel-help{margin-top:13px;border-left:2px solid var(--amber);padding:9px 10px;background:rgba(148,101,37,.11);color:#d1b98f;font-size:9px;line-height:1.55}
+.panel-counts{margin-top:13px;display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.count-tile{background:rgba(255,255,255,.045);border:1px solid rgba(171,198,214,.12);border-radius:10px;padding:9px}
+.count-tile b{display:block;color:#f1f6f8;font-size:15px;font-weight:800}
+.count-tile span{display:block;color:#8fa7b6;font-size:8px;text-transform:uppercase;letter-spacing:.1em;margin-top:3px}
+#legend{position:absolute;z-index:6;left:15px;bottom:14px;width:calc(100% - 340px);border:1px solid var(--line);border-radius:12px;background:rgba(7,22,35,.88);backdrop-filter:blur(12px);padding:9px 12px}
+.legend-head{color:#dce8ef;text-transform:uppercase;letter-spacing:.14em;font-size:8px;font-weight:900;margin-bottom:7px;display:flex;justify-content:space-between;gap:12px}
+.legend-grid{display:flex;flex-wrap:wrap;gap:7px 16px}
+.legend-item{display:flex;align-items:center;gap:6px;color:#a9bdcb;font-size:8px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 10px currentColor}
+.dot.clinical{color:var(--blue);background:var(--blue)} .dot.disease{color:var(--amber);background:var(--amber)} .dot.summary{color:var(--teal);background:var(--teal)} .dot.gene{color:var(--violet);background:var(--violet)}
+#status{position:absolute;z-index:6;left:16px;bottom:72px;color:#9bb1bf;font-size:8px;letter-spacing:.04em;background:rgba(7,21,34,.68);border:1px solid rgba(154,190,211,.14);border-radius:8px;padding:6px 8px}
+#loaderror{display:none;position:absolute;z-index:10;left:16px;bottom:72px;right:340px;color:#f3d7a5;background:rgba(53,43,30,.84);border:1px solid rgba(228,182,109,.32);border-radius:9px;padding:7px 10px;font-size:8px;line-height:1.4;pointer-events:none}
+@media(max-width:900px){#graph,#fallback{right:0;bottom:250px}#topbar,#selection{right:12px}#sidepanel{top:auto;left:12px;right:12px;bottom:12px;width:auto;height:220px}#zones{right:10px}#legend{width:calc(100% - 20px);left:10px;bottom:240px}#status{bottom:300px} }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="graph"></div>
+  <div id="fallback"></div>
+  <div id="topbar">
+    <div class="brand">
+      <div class="kicker">Evidence Atlas · Relationship Explorer</div>
+      <div class="title">A navigable map of evidence provenance</div>
+      <div class="sub">Source labels · cohort coverage · molecular observation summaries</div>
+    </div>
+    <div class="controls">
+      <button id="labels" class="active" type="button">Labels: on</button>
+      <button id="orbit" type="button">Auto orbit: off</button>
+      <button id="fit" type="button">Fit network</button>
+      <button id="reset" type="button">Reset</button>
+    </div>
+  </div>
+  <div id="selection">
+    <div class="selected-chip"><i class="orb"></i><div><small>Selected tumour label</small><strong id="tumour-name">Selected tumour</strong></div></div>
+    <div class="stats">
+      <div class="stat"><b id="stat-samples">—</b><span>Labelled samples</span></div>
+      <div class="stat"><b id="stat-genes">—</b><span>Gene symbols</span></div>
+      <div class="stat"><b id="stat-observations">—</b><span>Observations</span></div>
+    </div>
+  </div>
+  <div id="zones">
+    <div class="zone cohort"><b>01 · Clinical cohort</b><span>OpenPedCan clinical source and label coverage</span></div>
+    <div class="zone disease"><b>02 · Disease context</b><span>Selected tumour label used for source grouping</span></div>
+    <div class="zone molecular"><b>03 · Molecular observations</b><span>Aggregated gene-symbol observations and source lineage</span></div>
+  </div>
+  <aside id="sidepanel">
+    <div class="panel-kicker">Evidence detail</div>
+    <div id="detail-title" class="panel-title">Selected tumour</div>
+    <span id="detail-type" class="panel-type">Selected tumour label</span>
+    <div class="panel-counts">
+      <div class="count-tile"><b id="detail-samples">—</b><span>Labelled samples</span></div>
+      <div class="count-tile"><b id="detail-genes">—</b><span>Indexed symbols</span></div>
+      <div class="count-tile"><b id="detail-observations">—</b><span>Gene observations</span></div>
+      <div class="count-tile"><b id="detail-visible">—</b><span>Visible gene nodes</span></div>
+    </div>
+    <div id="detail-text" class="panel-detail">Select an entity to inspect its data role and source lineage.</div>
+    <div id="detail-source" class="panel-source"><b>Source lineage</b>OpenPedCan clinical metadata and the local research evidence index.</div>
+    <div class="panel-help">Connections represent source-table coverage, exact label grouping and aggregated observations. They do not establish biological causality, gene dependency, treatment response or clinical efficacy.</div>
+  </aside>
+  <div id="status">Drag to rotate · Scroll to zoom · Select any labelled node to inspect its source</div>
+  <div id="legend">
+    <div class="legend-head"><span>Evidence entity types</span><span>Node size reflects its displayed role, not biological importance</span></div>
+    <div class="legend-grid">
+      <span class="legend-item"><i class="dot clinical"></i>Clinical source / cohort</span>
+      <span class="legend-item"><i class="dot disease"></i>Selected tumour label</span>
+      <span class="legend-item"><i class="dot summary"></i>Indexed summary / source</span>
+      <span class="legend-item"><i class="dot gene"></i>Gene-symbol observation</span>
+    </div>
+  </div>
+  <div id="loaderror">The 3D renderer or text-label library could not load. The readable network fallback is shown where available. Check the browser's access to jsDelivr and WebGL, then reload.</div>
+</div>
+<script>
+const DATA = __GRAPH_DATA__;
+const EDGE = {clinical:'#79afe1', grouping:'#f1bf73', provenance:'#58c6b5', observation:'#b49aef'};
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = value => Number(value || 0).toLocaleString('en-US');
+const setText = (id, value) => { const el=document.getElementById(id); if(el) el.textContent=String(value ?? ''); };
+setText('tumour-name', DATA.tumourLabel);
+setText('detail-title', DATA.tumourLabel);
+setText('detail-type', 'Tumour label');
+setText('stat-samples', DATA.stats.samples);
+setText('stat-genes', DATA.stats.genes);
+setText('stat-observations', DATA.stats.observations);
+setText('detail-samples', DATA.stats.samples);
+setText('detail-genes', DATA.stats.genes);
+setText('detail-observations', DATA.stats.observations);
+setText('detail-visible', DATA.stats.visible);
+setText('detail-text', `This view starts from the OpenPedCan tumour_type label “${DATA.tumourLabel}”. It links the matching clinical label-coverage count to the gene-associated summary grouped under the same exact text label. Individual gene nodes show aggregated observation counts. The graph is a provenance and navigation view, not a biological mechanism model.`);
+const nodeById = new Map(DATA.nodes.map(n => [n.id,n]));
+const linkIds = l => [typeof l.source==='object'?l.source.id:l.source, typeof l.target==='object'?l.target.id:l.target];
+
+function renderFallback(reason) {
+  const host=document.getElementById('fallback');
+  const width=1100, height=520;
+  const coords=new Map();
+  DATA.nodes.forEach(n => coords.set(n.id,{x:width/2 + (Number(n.x)||0)*0.58, y:height/2 - (Number(n.y)||0)*0.58}));
+  const lineMarkup=DATA.links.map(l=>{
+    const [a,b]=linkIds(l), A=coords.get(a), B=coords.get(b);
+    if(!A||!B)return '';
+    return `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="${EDGE[l.kind]||'#8da7b7'}" stroke-width="2.2" opacity=".72"/>`;
+  }).join('');
+  const nodesMarkup=DATA.nodes.map(n=>{
+    const p=coords.get(n.id), r=n.id==='disease:selected'?18:(n.kind==='Gene symbol'?8:12);
+    const lines=String(n.displayLabel||n.label).split('\n');
+    return `<g><circle cx="${p.x}" cy="${p.y}" r="${r+7}" fill="${n.color}" opacity=".12"/><circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${n.color}" stroke="#e9f5f7" stroke-opacity=".7" stroke-width="1.3"/><text x="${p.x}" y="${p.y+r+18}" text-anchor="middle" fill="#eaf3f6" font-size="${n.kind==='Gene symbol'?12:14}" font-weight="700">${esc(lines[0])}</text><text x="${p.x}" y="${p.y+r+32}" text-anchor="middle" fill="#9eb6c4" font-size="10">${esc(lines[1]||n.kind)}</text></g>`;
+  }).join('');
+  host.innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Fallback evidence relationship network"><defs><radialGradient id="fbGlow"><stop stop-color="#214a5b"/><stop offset="1" stop-color="#0a1e2e"/></radialGradient></defs><rect width="100%" height="100%" rx="18" fill="url(#fbGlow)"/>${lineMarkup}${nodesMarkup}</svg>`;
+  host.style.display='block';
+  document.getElementById('graph').style.display='none';
+  document.getElementById('loaderror').style.display='none';
+  setText('status', reason || 'Showing readable 2D fallback because the 3D renderer is unavailable.');
+}
+
+if (!window.ForceGraph3D || !window.SpriteText) {
+  renderFallback('3D libraries unavailable · readable evidence map is shown instead.');
+} else {
+  const graphEl=document.getElementById('graph');
+  let selectedId='disease:selected';
+  let neighbourIds=new Set();
+  let labelsOn=true;
+  let autoOrbit=false;
+  const nodes=DATA.nodes.map(n=>({...n}));
+  const links=DATA.links.map(l=>({...l,source:l.source,target:l.target}));
+  const baseLinkMap=DATA.links.map(l=>({...l}));
+
+  const Graph = ForceGraph3D(graphEl,{controlType:'orbit',rendererConfig:{antialias:true,alpha:true}})
+    .graphData({nodes,links})
+    .backgroundColor('#0a1e2e')
+    .showNavInfo(false)
+    .nodeId('id')
+    .nodeLabel(n=>`<div style="font-family:Inter,Arial;padding:8px 10px;max-width:260px"><b>${esc(n.label)}</b><br><span style="color:#a5c0cf">${esc(n.kind)}</span><br><span style="color:#d0dfe6">${esc(n.detail)}</span></div>`)
+    .nodeColor(n=> n.id===selectedId ? '#fff0ce' : (selectedId && neighbourIds.size && !neighbourIds.has(n.id) && n.id!==selectedId ? '#233b4c' : n.color))
+    .nodeVal(n=>n.value||5)
+    .nodeRelSize(5.4)
+    .nodeResolution(20)
+    .nodeOpacity(.98)
+    .nodeThreeObject(n=>{
+      if(!labelsOn) return null;
+      const txt = new window.SpriteText(n.displayLabel || n.label);
+      txt.color = n.labelColor || n.color;
+      txt.textHeight = n.labelHeight || (n.kind==='Tumour label'?15:(n.kind==='Gene symbol'?7:9));
+      txt.fontFace = 'Inter, Arial, sans-serif';
+      txt.fontWeight = n.kind==='Tumour label' ? 'bold' : '700';
+      txt.backgroundColor = 'rgba(6,18,29,0.86)';
+      txt.padding = n.kind==='Tumour label' ? 4 : 2;
+      txt.borderRadius = 3;
+      txt.borderWidth = 0.7;
+      txt.borderColor = n.color;
+      txt.strokeWidth = 0.35;
+      txt.strokeColor = '#061522';
+      txt.material.depthWrite = false;
+      txt.position.y = n.labelOffsetY || (n.kind==='Gene symbol'?8:13);
+      return txt;
+    })
+    .nodeThreeObjectExtend(true)
+    .linkColor(l=>{
+      const [a,b]=linkIds(l);
+      if(!selectedId || !neighbourIds.size) return EDGE[l.kind] || '#8aa2b2';
+      return (a===selectedId || b===selectedId || neighbourIds.has(a) || neighbourIds.has(b))
+        ? (EDGE[l.kind] || '#8aa2b2') : '#203746';
+    })
+    .linkWidth(l=>l.kind==='grouping'?2.6:(l.kind==='observation'?1.7:1.9))
+    .linkOpacity(.82)
+    .linkDirectionalArrowLength(l=>l.kind==='observation'?3:5)
+    .linkDirectionalArrowRelPos(1)
+    .linkDirectionalArrowColor(l=>EDGE[l.kind] || '#8aa2b2')
+    .linkDirectionalParticles(l=>l.kind==='observation'?2:1)
+    .linkDirectionalParticleWidth(2.1)
+    .linkDirectionalParticleSpeed(.003)
+    .linkDirectionalParticleColor(l=>EDGE[l.kind]||'#c7d5dc')
+    .linkLabel(l=>`<div style="font-family:Inter,Arial;padding:7px 9px"><b>${esc(l.label||'Evidence relationship')}</b><br><span style="color:#bacbd4">${esc(l.detail||'')}</span></div>`)
+    .onNodeClick(node=>{
+      selectedId=node.id;
+      neighbourIds=new Set();
+      baseLinkMap.forEach(l=>{const [a,b]=linkIds(l);if(a===node.id)neighbourIds.add(b);if(b===node.id)neighbourIds.add(a);});
+      setText('detail-title',node.label);
+      setText('detail-type',node.kind);
+      setText('detail-text',node.detail||'No additional detail supplied.');
+      setText('detail-source',`Source lineage\n${node.source||'Not specified'}`);
+      Graph.nodeColor(Graph.nodeColor());
+      Graph.linkColor(Graph.linkColor());
+      const target={x:node.x||0,y:node.y||0,z:node.z||0};
+      const len=Math.hypot(target.x,target.y,target.z)||1;
+      const distance=270;
+      const ratio=1+distance/len;
+      Graph.cameraPosition({x:target.x*ratio,y:target.y*ratio,z:target.z*ratio},target,850);
+    })
+    .onLinkClick(link=>{
+      const a=typeof link.source==='object'?link.source.label:link.source;
+      const b=typeof link.target==='object'?link.target.label:link.target;
+      setText('detail-title',link.label||'Evidence relationship');
+      setText('detail-type',`Relationship · ${link.kind}`);
+      setText('detail-text',`${a} → ${b}\n\n${link.detail||''}`);
+      setText('detail-source','Relationship semantics are descriptive and source-defined.');
+    });
+
+  // Preserve the hand-laid evidence layers: the force engine should not scatter
+  // the selected disease label away from its clinical and molecular context.
+  Graph.d3Force('charge').strength(-12);
+  Graph.d3Force('link').distance(l=>l.kind==='observation'?110:145).strength(.55);
+  Graph.d3VelocityDecay(.48);
+  Graph.warmupTicks(0);
+  Graph.cooldownTime(2500);
+  Graph.cameraPosition({x:30,y:45,z:1020},{x:40,y:0,z:0},0);
+  Graph.controls().autoRotate=false;
+  Graph.controls().autoRotateSpeed=.18;
+
+  document.getElementById('orbit').addEventListener('click',ev=>{
+    autoOrbit=!autoOrbit; Graph.controls().autoRotate=autoOrbit;
+    ev.currentTarget.classList.toggle('active',autoOrbit);
+    ev.currentTarget.textContent=`Auto orbit: ${autoOrbit?'on':'off'}`;
+  });
+  document.getElementById('labels').addEventListener('click',ev=>{
+    labelsOn=!labelsOn;
+    Graph.nodeThreeObject(n=>{
+      if(!labelsOn)return null;
+      const txt=new window.SpriteText(n.displayLabel||n.label);
+      txt.color=n.labelColor||n.color; txt.textHeight=n.labelHeight||(n.kind==='Tumour label'?15:(n.kind==='Gene symbol'?7:9));
+      txt.fontFace='Inter, Arial, sans-serif'; txt.fontWeight='700';
+      txt.backgroundColor='rgba(6,18,29,0.86)';txt.padding=n.kind==='Tumour label'?4:2;txt.borderRadius=3;
+      txt.borderWidth=.7;txt.borderColor=n.color;txt.material.depthWrite=false;
+      txt.position.y=n.labelOffsetY||(n.kind==='Gene symbol'?8:13);return txt;
+    });
+    ev.currentTarget.classList.toggle('active',labelsOn);
+    ev.currentTarget.textContent=`Labels: ${labelsOn?'on':'off'}`;
+  });
+  document.getElementById('fit').addEventListener('click',()=>Graph.zoomToFit(800,95));
+  document.getElementById('reset').addEventListener('click',()=>{
+    selectedId='disease:selected';neighbourIds=new Set();
+    const tumour=nodeById.get('disease:selected');
+    setText('detail-title',tumour.label);setText('detail-type',tumour.kind);
+    setText('detail-text',tumour.detail);setText('detail-source',`Source lineage\n${tumour.source}`);
+    Graph.nodeColor(Graph.nodeColor());
+    Graph.linkColor(Graph.linkColor());
+    Graph.cameraPosition({x:30,y:45,z:1020},{x:40,y:0,z:0},850);
+  });
+  window.addEventListener('resize',()=>Graph.width(graphEl.clientWidth).height(graphEl.clientHeight));
+  setTimeout(()=>Graph.zoomToFit(900,100),1100);
+}
+</script>
+</body>
+</html>'''
+
+    document = document.replace("__GRAPH_DATA__", payload)
+
+    alt = f"Interactive 3D evidence relationship graph for {tumour_label}"
+    if hasattr(st, "iframe"):
+        try:
+            st.iframe(document, width="stretch", height=height, alt=alt)
+        except TypeError:  # Compatibility with older Streamlit iframe signatures.
+            components.html(document, height=height, scrolling=False)
+    else:
+        components.html(document, height=height, scrolling=False)

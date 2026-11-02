@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Read-only structural validator for the typed graph produced by migrate_graph_v2.py."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_GRAPH = ROOT / "data" / "processed" / "graph_v2" / "typed_graph_v2.pt"
+DEFAULT_MANIFEST = ROOT / "data" / "processed" / "graph_v2" / "graph_v2_manifest.json"
+
+
+def main() -> int:
+    graph_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_GRAPH
+    manifest_path = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else DEFAULT_MANIFEST
+
+    if not graph_path.is_file():
+        raise FileNotFoundError(f"Typed graph not found: {graph_path}")
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    # Only load graph files generated locally by this pipeline; torch.load uses
+    # Python deserialization and should not be used on untrusted files.
+    graph = torch.load(graph_path, map_location="cpu", weights_only=False)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    errors: list[str] = []
+    total_nodes = 0
+    total_edges = 0
+    print("=== GRAPH V2 VALIDATION ===")
+    print("Schema version:", getattr(graph, "schema_version", "missing"))
+    print("Node types:", len(graph.node_types))
+    print("Relationship types:", len(graph.edge_types))
+
+    for node_type in graph.node_types:
+        store = graph[node_type]
+        count = int(store.num_nodes)
+        ids = getattr(store, "node_ids", None)
+        if ids is None or len(ids) != count:
+            errors.append(f"{node_type}: node_ids count does not match num_nodes")
+        elif len(set(ids)) != len(ids):
+            errors.append(f"{node_type}: duplicate identifiers within node type")
+        total_nodes += count
+        print(f"Nodes / {node_type}: {count:,}")
+
+    source_edge_ids: list[torch.Tensor] = []
+    for edge_type in graph.edge_types:
+        source_type, relation, target_type = edge_type
+        store = graph[edge_type]
+        edge_index = store.edge_index
+        edge_count = int(edge_index.shape[1])
+        total_edges += edge_count
+        if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+            errors.append(f"{edge_type}: edge_index must have shape [2, E]")
+        elif edge_count:
+            if edge_index.min().item() < 0:
+                errors.append(f"{edge_type}: negative node index")
+            if edge_index[0].max().item() >= int(graph[source_type].num_nodes):
+                errors.append(f"{edge_type}: source index out of range")
+            if edge_index[1].max().item() >= int(graph[target_type].num_nodes):
+                errors.append(f"{edge_type}: target index out of range")
+
+        legacy_attr = getattr(store, "edge_attr_legacy", None)
+        legacy_weight = getattr(store, "edge_weight_legacy", None)
+        source_edge_id = getattr(store, "source_edge_id", None)
+        if legacy_attr is None or legacy_attr.shape[0] != edge_count:
+            errors.append(f"{edge_type}: legacy edge attributes missing or wrong length")
+        elif not torch.isfinite(legacy_attr).all().item():
+            errors.append(f"{edge_type}: non-finite legacy edge attributes")
+        if legacy_weight is None or legacy_weight.numel() != edge_count:
+            errors.append(f"{edge_type}: legacy edge weights missing or wrong length")
+        elif not torch.isfinite(legacy_weight).all().item():
+            errors.append(f"{edge_type}: non-finite legacy edge weights")
+        if source_edge_id is None or source_edge_id.numel() != edge_count:
+            errors.append(f"{edge_type}: source_edge_id missing or wrong length")
+        else:
+            source_edge_ids.append(source_edge_id.to(torch.long))
+        print(f"Edges / {source_type} -[{relation}]-> {target_type}: {edge_count:,}")
+
+    expected_nodes = int(manifest.get("node_count", -1))
+    expected_edges = int(manifest.get("edge_count", -1))
+    if total_nodes != expected_nodes:
+        errors.append(f"Node total {total_nodes} does not match manifest {expected_nodes}")
+    if total_edges != expected_edges:
+        errors.append(f"Edge total {total_edges} does not match manifest {expected_edges}")
+
+    if source_edge_ids:
+        ids = torch.cat(source_edge_ids)
+        if ids.numel() != expected_edges:
+            errors.append("Total source_edge_id count does not match manifest edge_count")
+        elif ids.numel():
+            sorted_ids = torch.sort(ids).values
+            expected = torch.arange(expected_edges, dtype=torch.long)
+            if not torch.equal(sorted_ids, expected):
+                errors.append("source_edge_id values are not a one-to-one mapping of the original edges")
+
+    print("\nTotal nodes:", f"{total_nodes:,}")
+    print("Total edges:", f"{total_edges:,}")
+    if errors:
+        print(f"\nVALIDATION FAILED ({len(errors)} issue(s)):")
+        for error in errors:
+            print(" -", error)
+        return 1
+    print("\nVALIDATION PASSED: indices, IDs, legacy attributes and edge mapping are structurally consistent.")
+    print("This does not validate biological correctness or completeness of the source evidence.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise
