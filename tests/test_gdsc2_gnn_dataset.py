@@ -83,6 +83,6 @@ def test_rejects_duplicate_expression_column_assignment():
 
 def test_rejects_fold_id_outside_frozen_five_fold_scheme():
     responses, crosswalk, labels, genes, expression = _fixture()
-    responses.loc[2, "fold"] = 5
+    responses.loc[2, "fold"] = 6
     with pytest.raises(ValueError, match="Unexpected frozen fold IDs outside 1-5"):
         assemble_response_dataset(responses, crosswalk, labels, genes, expression)
