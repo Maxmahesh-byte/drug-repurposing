@@ -100,3 +100,23 @@ After the local expression crosswalk has been built and audited, prepare a stand
 The builder reuses the validated GDSC2 response loader and frozen five-fold assignments, checks every crosswalk sample label and graph cell-line ID, and excludes models without an exact expression match. It writes `data/ai/response_dataset/gdsc2_matched_response_pairs.csv`, a compressed expression-feature matrix, and a JSON provenance/validation summary. Expression rows are aligned to sorted Sanger model IDs; pair rows carry the corresponding expression-row index.
 
 Crucially, measured `ln_ic50` and `auc` remain labels in the pair table, not node or edge features. The legacy graph's `gdsc2_response` relation must not be passed to message passing; alternatively, a rigorously fold-filtered training-only relation would be required. Fit expression scaling and feature selection inside each training fold only. This step prepares data; it does not train a GNN or establish clinical prediction.
+
+
+### Five-fold drug–cell-line pair GNN benchmark
+
+After preparing the response-pair dataset, run the exploratory pair model:
+
+```bash
+./.venv/bin/python -m pytest tests/test_gdsc2_pair_gnn.py -q
+
+./.venv/bin/python scripts/ai/train_gdsc2_pair_gnn.py \
+  --data-dir data/ai/response_dataset \
+  --graph-file data/processed/graph_v2/typed_graph_v2.pt \
+  --output-dir data/ai/gdsc2_pair_gnn
+```
+
+The model uses a compact drug-side RGCN over only the typed evidence relations drug→ChEMBL molecule→direct mechanism target→gene. Cell-line expression is encoded separately and fused with the drug embedding by a pairwise prediction head with LN(IC50) and AUC outputs. The legacy `gdsc2_response` relation is not copied into the model graph.
+
+The five outer folds are the frozen GroupKFold assignments by Sanger model ID. An inner group-level validation split is taken only from each outer training set. Expression variance feature selection and standardisation are fitted only on the inner-fit cell lines for that outer fold. The script saves fold checkpoints, out-of-fold predictions, metrics, and a same-curve-ID comparison against the existing drug+cancer median baseline when the baseline files are present.
+
+This is a first transductive known-drug benchmark. It is not an unseen-drug test, patient-outcome model, or clinical predictor. Review the saved fold metrics and same-row baseline comparison before interpreting any apparent gain.
