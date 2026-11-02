@@ -120,3 +120,24 @@ The model uses a compact drug-side RGCN over only the typed evidence relations d
 The five outer folds are the frozen GroupKFold assignments by Sanger model ID. An inner group-level validation split is taken only from each outer training set. Expression variance feature selection and standardisation are fitted only on the inner-fit cell lines for that outer fold. The script saves fold checkpoints, out-of-fold predictions, metrics, and a same-curve-ID comparison against the existing drug+cancer median baseline when the baseline files are present.
 
 This is a first transductive known-drug benchmark. It is not an unseen-drug test, patient-outcome model, or clinical predictor. Review the saved fold metrics and same-row baseline comparison before interpreting any apparent gain.
+
+
+### Controlled GDSC2 pair-model ablations
+
+Run the matched five-fold ablation experiment after preparing the response-pair dataset and local graph artifact:
+
+```bash
+./.venv/bin/python -m pytest tests/test_gdsc2_pair_gnn_ablations.py -q
+
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_ablations.py \
+  --data-dir data/ai/response_dataset \
+  --graph-file data/processed/graph_v2/typed_graph_v2.pt \
+  --output-dir data/ai/gdsc2_pair_gnn_ablations
+```
+
+The runner compares three variants on identical frozen outer folds and inner cell-line validation groups:
+- `full_graph`: RGCN drug-target evidence encoder + expression encoder + pair head.
+- `drug_id_only`: learned drug identity embedding + expression encoder, with no graph propagation.
+- `expression_only`: expression encoder only, with neither drug identity nor graph.
+
+All variants share fold-specific expression feature selection/scaling. LN(IC50) and AUC are standardised independently using inner-fit response rows only; predictions are inverse-transformed before MAE, RMSE, and R² are reported. This avoids the larger numerical scale of LN(IC50) dominating the joint training loss. Fold checkpoints, OOF predictions, fold metrics, and external baseline comparisons (where exact curve-ID and fold overlap is available) are saved locally. The experiment remains a known-drug, held-out-cell-line, transductive in-vitro benchmark, not an unseen-drug or clinical evaluation.
