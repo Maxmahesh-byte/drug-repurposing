@@ -61,7 +61,7 @@ def test_oof_file_validator_rejects_changed_fold_assignments(tmp_path):
     other.loc[0, "fold"] = 2
     path = tmp_path / "other.csv"
     other.to_csv(path, index=False)
-    with pytest.raises(ValueError, match="frozen folds 1-5|assigns a Sanger model"):
+    with pytest.raises(ValueError, match="fold assignments differ|frozen folds 1-5|assigns a Sanger model"):
         MODULE.validate_oof_file(path, reference)
 
 
