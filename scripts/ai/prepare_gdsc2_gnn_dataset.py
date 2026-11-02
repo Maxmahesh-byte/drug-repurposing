@@ -12,9 +12,14 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
+import sys
 
 import numpy as np
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from scripts.ai.train_gdsc2_expression_model import (
     FOLD_SOURCE,
@@ -23,7 +28,6 @@ from scripts.ai.train_gdsc2_expression_model import (
     _read_responses,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXPRESSION = ROOT / "data/raw/expression/E-MTAB-2770_tpmss.tsv"
 DEFAULT_CROSSWALK = ROOT / "data/ai/audits/gdsc2_expression_cell_line_crosswalk.csv"
 DEFAULT_OUTPUT_DIR = ROOT / "data/ai/response_dataset"
