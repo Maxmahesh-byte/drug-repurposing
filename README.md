@@ -44,6 +44,15 @@ The active DVC pipeline ingests four real OpenPedCan evidence layers, GDSC2 cell
 ./.venv/bin/python scripts/ai/train_gdsc2_expression_model.py
 ```
 
+To use a previously downloaded local copy of the same TPM matrix and record its file checksum in the model bundle and summary:
+
+```bash
+./.venv/bin/python scripts/ai/train_gdsc2_expression_model.py \
+  --expression-file data/raw/expression/E-MTAB-2770_tpmss.tsv
+```
+
+The local file uses the same validation, `log2(TPM + 1)` transformation, and fold-specific feature selection as the streamed source. Keep large expression matrices out of Git and retain their SHA-256 checksums in local provenance records.
+
 At the initial audit, case-insensitive exact cell-line names matched 528 of 969 GDSC2 models; ambiguous matches are excluded. The script reuses the frozen five-fold Sanger-ID held-out-cell-line assignments, selects variable genes using each training fold only, and compares predictions against response-only baselines on the same matched rows. It streams the full public expression matrix, so the first run may take substantial time. The generated JSON bundle can be used with `src.inference.gdsc2_expression.predict_expression_response`; input values must be raw TPM keyed by the same gene IDs. This is limited to known drugs and cell-line response estimates; it does not predict unseen drugs, patient response, clinical efficacy, or combinations.
 
 The Streamlit dashboard includes a separate **Molecular response model** workspace for running the benchmark, reviewing results, and optionally estimating response from an uploaded cell-line TPM profile after a trained model bundle exists.
