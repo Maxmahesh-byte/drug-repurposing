@@ -235,7 +235,10 @@ def main(args) -> dict:
             raise FileNotFoundError(f"Required input not found: {path}")
 
     print("Loading prepared response pairs and expression features...", flush=True)
-    pairs = pd.read_csv(pair_path, dtype={"drug_id": str, "sanger_model_id": str})
+    pairs = pd.read_csv(
+        pair_path,
+        dtype={"curve_id": str, "drug_id": str, "sanger_model_id": str},
+    )
     with np.load(expression_path, allow_pickle=False) as archive:
         expression = archive["expression_log2_tpm"].astype(np.float32)
         gene_ids = archive["gene_ids"].astype(str)
@@ -344,7 +347,10 @@ def main(args) -> dict:
                 "expected_path": str(baseline_path),
             }
             continue
-        baseline = pd.read_csv(baseline_path, dtype={"curve_id": str})
+        baseline = pd.read_csv(
+            baseline_path,
+            dtype={"curve_id": str, "drug_id": str, "sanger_model_id": str},
+        )
         if baseline["curve_id"].duplicated().any():
             raise ValueError(f"Duplicate curve IDs in baseline file: {baseline_path}")
         matched = oof[["curve_id", "fold", gnn_col]].merge(
