@@ -8,10 +8,10 @@ from scripts.ai.prepare_gdsc2_gnn_dataset import assemble_response_dataset
 def _fixture():
     responses = pd.DataFrame(
         [
-            ("C1", "1", "Drug A", "Cell A", "SIDM001", "NB", 0, 1.2, 0.3),
-            ("C2", "2", "Drug B", "Cell A", "SIDM001", "NB", 0, 2.2, 0.4),
-            ("C3", "1", "Drug A", "Cell B", "SIDM002", "ALL", 1, 3.2, 0.5),
-            ("C4", "2", "Drug B", "Cell B", "SIDM002", "ALL", 1, 4.2, 0.6),
+            ("C1", "1", "Drug A", "Cell A", "SIDM001", "NB", 1, 1.2, 0.3),
+            ("C2", "2", "Drug B", "Cell A", "SIDM001", "NB", 1, 2.2, 0.4),
+            ("C3", "1", "Drug A", "Cell B", "SIDM002", "ALL", 2, 3.2, 0.5),
+            ("C4", "2", "Drug B", "Cell B", "SIDM002", "ALL", 2, 4.2, 0.6),
         ],
         columns=[
             "curve_id", "drug_id", "drug_name", "cell_line", "sanger_model_id",
@@ -84,5 +84,5 @@ def test_rejects_duplicate_expression_column_assignment():
 def test_rejects_fold_id_outside_frozen_five_fold_scheme():
     responses, crosswalk, labels, genes, expression = _fixture()
     responses.loc[2, "fold"] = 5
-    with pytest.raises(ValueError, match="Unexpected frozen fold IDs outside 0-4"):
+    with pytest.raises(ValueError, match="Unexpected frozen fold IDs outside 1-5"):
         assemble_response_dataset(responses, crosswalk, labels, genes, expression)
