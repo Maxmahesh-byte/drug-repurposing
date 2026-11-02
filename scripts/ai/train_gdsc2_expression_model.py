@@ -125,10 +125,10 @@ def _read_expression_matrix(
 
     try:
         for source_line in line_iterator:
-            raw_line = source_line.rstrip(b"\\r\\n")
+            raw_line = source_line.rstrip(b"\r\n")
             if not raw_line or raw_line.startswith(b"#"):
                 continue
-            row = next(csv.reader([raw_line.decode("utf-8")], delimiter="\\t"))
+            row = next(csv.reader([raw_line.decode("utf-8")], delimiter="\t"))
             if sample_labels is None:
                 if row[:2] != ["Gene ID", "Gene Name"]:
                     raise ValueError("Unexpected Expression Atlas matrix header.")
