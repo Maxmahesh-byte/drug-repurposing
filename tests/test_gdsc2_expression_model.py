@@ -89,6 +89,38 @@ def test_predict_expression_response_does_not_fallback_for_unknown_drug():
         predict_expression_response(_bundle(), "unknown", {"ENSG1": 1.0})
 
 
+
+def test_read_expression_matrix_from_local_file(tmp_path):
+    import csv
+    import numpy as np
+
+    from scripts.ai.train_gdsc2_expression_model import _read_expression_matrix
+
+    path = tmp_path / "tpmss.tsv"
+    sample_labels = [f"Sample{i}, tumour" for i in range(1019)]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\\t", lineterminator="\\n")
+        writer.writerow(["Gene ID", "Gene Name", *sample_labels])
+        writer.writerow(["ENSG000001", "Variable gene", *range(1019)])
+        writer.writerow(["ENSG000002", "Constant gene", *([5] * 1019)])
+
+    labels, gene_ids, expression, parsed_digest = _read_expression_matrix(path)
+
+    assert labels == sample_labels
+    assert gene_ids == ["ENSG000001"]
+    assert expression.shape == (1, 1019)
+    assert expression.dtype == np.float32
+    assert np.isfinite(expression).all()
+    assert len(parsed_digest) == 64
+
+
+def test_read_expression_matrix_rejects_missing_local_file(tmp_path):
+    from scripts.ai.train_gdsc2_expression_model import _read_expression_matrix
+
+    with pytest.raises(FileNotFoundError, match="Expression matrix file is missing"):
+        _read_expression_matrix(tmp_path / "missing.tsv")
+
+
 def test_exact_name_crosswalk_excludes_ambiguous_names():
     import pandas as pd
 
@@ -365,7 +397,9 @@ def test_training_pipeline_writes_oof_predictions_and_bundle(tmp_path, monkeypat
     monkeypatch.setattr(
         train_gdsc2_expression_model,
         "_read_expression_matrix",
-        lambda: (labels, ["ENSG1", "ENSG2", "ENSG3", "ENSG4"], expression, "digest"),
+        lambda _expression_file=None: (
+            labels, ["ENSG1", "ENSG2", "ENSG3", "ENSG4"], expression, "digest"
+        ),
     )
 
     train_gdsc2_expression_model.main()
