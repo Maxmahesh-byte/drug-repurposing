@@ -4,10 +4,12 @@ These instructions cover the Python development environment and general software
 
 ## Requirements
 
-- Python 3.11 (the container and automation configuration currently specify this version).
+- Python 3.11 (the container and inspected automation configuration currently specify this version).
 - Git.
 - A virtual-environment tool.
 - Docker Compose only when working on container configuration.
+
+The Dev Container configuration currently selects a generic Ubuntu base image and does not itself declare a Python version. Check the installed interpreter before creating an environment.
 
 ## Create an isolated environment
 
@@ -29,14 +31,18 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 ```
 
-Install the pinned Python dependencies:
+Install the root dependency set:
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The repository currently also contains a dashboard-specific requirements file. Before changing dependencies, confirm which dependency set is intended for the component being developed.
+## Dependency-file note
+
+The repository also contains `requirements-dashboard.txt`. At the reviewed revision, the Dockerfile installs `requirements.txt` only. The dashboard-specific file uses version ranges, while the root file uses exact direct-version pins. These files should not be treated as interchangeable or assumed to produce identical environments.
+
+The maintainers should document which dependency set is intended for each supported development and deployment route before either file is changed. See [Dependency management policy](DEPENDENCY_POLICY.md) and [Configuration consistency audit](CONFIGURATION_AUDIT.md).
 
 ## General software checks
 
