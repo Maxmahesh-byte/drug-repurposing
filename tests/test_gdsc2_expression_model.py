@@ -99,7 +99,7 @@ def test_read_expression_matrix_from_local_file(tmp_path):
     path = tmp_path / "tpmss.tsv"
     sample_labels = [f"Sample{i}, tumour" for i in range(1019)]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\\t", lineterminator="\\n")
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["Gene ID", "Gene Name", *sample_labels])
         writer.writerow(["ENSG000001", "Variable gene", *range(1019)])
         writer.writerow(["ENSG000002", "Constant gene", *([5] * 1019)])
