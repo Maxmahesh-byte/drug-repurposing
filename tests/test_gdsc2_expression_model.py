@@ -3,10 +3,13 @@ import pytest
 from scripts.ai.train_gdsc2_expression_model import (
     _baseline_predictions,
     _build_exact_name_crosswalk,
+    _filter_reported_cancer_types,
+    _filter_to_verified_pediatric_models,
     _fit_fold_models,
     _select_fold_features,
 )
 from scripts.ai import train_gdsc2_expression_model
+from scripts.ai.audit_gdsc2_model_origins import parse_age_years
 from src.inference.gdsc2_expression import predict_expression_response
 
 
@@ -48,6 +51,23 @@ def test_predict_expression_response_returns_each_trained_endpoint():
     assert result["drug_id"] == "10"
     assert set(result["predictions"]) == {"ln_ic50", "auc"}
     assert result["training_models"] == {"ln_ic50": 25, "auc": 25}
+
+
+def test_predict_expression_response_reports_scoped_training_labels():
+    bundle = _bundle()
+    bundle["scope"] = {
+        "reported_cancer_types": ["ALL", "MB", "NB"],
+        "pediatric_origin_verified": False,
+    }
+
+    result = predict_expression_response(
+        bundle,
+        "10",
+        {"ENSG1": 3.0, "ENSG2": 3.0},
+    )
+
+    assert result["reported_cancer_types"] == ["ALL", "MB", "NB"]
+    assert result["pediatric_origin_verified"] is False
 
 
 def test_predict_expression_response_rejects_missing_features():
@@ -131,6 +151,119 @@ def test_drug_cancer_baseline_falls_back_when_training_group_is_small():
 
     assert result[50]["baseline_drug_cancer_median"] == 100.5
     assert result[50]["baseline_drug_median"] == 100.5
+
+
+def test_filter_reported_cancer_types_is_case_insensitive_and_explicit():
+    import pandas as pd
+
+    responses = pd.DataFrame(
+        {
+            "reported_cancer_type": ["NB", "MB", "ALL", None],
+            "curve_id": ["1", "2", "3", "4"],
+        }
+    )
+
+    filtered, scope = _filter_reported_cancer_types(responses, {"nb", " ALL "})
+
+    assert scope == {"NB", "ALL"}
+    assert filtered["curve_id"].tolist() == ["1", "3"]
+    assert responses["reported_cancer_type"].tolist() == ["NB", "MB", "ALL", None]
+
+
+def test_filter_reported_cancer_types_rejects_empty_match():
+    import pandas as pd
+
+    responses = pd.DataFrame({"reported_cancer_type": ["NB"]})
+
+    with pytest.raises(ValueError, match="No GDSC2 response rows matched"):
+        _filter_reported_cancer_types(responses, {"MB"})
+
+
+def test_origin_audit_keeps_only_stable_id_matched_pediatric_models(tmp_path):
+    import pandas as pd
+
+    audit_path = tmp_path / "origin_audit.csv"
+    pd.DataFrame(
+        [
+            {
+                "sanger_model_id": "SIDM1",
+                "cell_line": "Line A",
+                "cellosaurus_id": "CVCL_0001",
+                "cellosaurus_age": "8Y",
+                "age_years": 8.0,
+                "origin_classification": "confirmed_pediatric",
+                "cellosaurus_url": "https://www.cellosaurus.org/CVCL_0001",
+                "cell_model_passport_url": (
+                    "https://cellmodelpassports.sanger.ac.uk/passports/SIDM1"
+                ),
+            },
+            {
+                "sanger_model_id": "SIDM2",
+                "cell_line": "Line B",
+                "cellosaurus_id": "CVCL_0002",
+                "cellosaurus_age": "27Y",
+                "age_years": 27.0,
+                "origin_classification": "confirmed_adult",
+                "cellosaurus_url": "https://www.cellosaurus.org/CVCL_0002",
+                "cell_model_passport_url": (
+                    "https://cellmodelpassports.sanger.ac.uk/passports/SIDM2"
+                ),
+            },
+        ]
+    ).to_csv(audit_path, index=False)
+    responses = pd.DataFrame(
+        {
+            "sanger_model_id": ["SIDM1", "SIDM2"],
+            "cell_line": ["Line A", "Line B"],
+        }
+    )
+
+    selected, scope = _filter_to_verified_pediatric_models(responses, audit_path)
+
+    assert selected["sanger_model_id"].tolist() == ["SIDM1"]
+    assert scope["pediatric_origin_verified"] is True
+    assert scope["included_sanger_model_ids"] == ["SIDM1"]
+    assert scope["excluded_confirmed_adult_models"] == 1
+
+
+def test_origin_audit_rejects_age_classification_conflict(tmp_path):
+    import pandas as pd
+
+    audit_path = tmp_path / "origin_audit.csv"
+    pd.DataFrame(
+        [
+            {
+                "sanger_model_id": "SIDM1",
+                "cell_line": "Line A",
+                "cellosaurus_id": "CVCL_0001",
+                "cellosaurus_age": "27Y",
+                "age_years": 27.0,
+                "origin_classification": "confirmed_pediatric",
+                "cellosaurus_url": "https://www.cellosaurus.org/CVCL_0001",
+                "cell_model_passport_url": (
+                    "https://cellmodelpassports.sanger.ac.uk/passports/SIDM1"
+                ),
+            }
+        ]
+    ).to_csv(audit_path, index=False)
+    responses = pd.DataFrame(
+        {"sanger_model_id": ["SIDM1"], "cell_line": ["Line A"]}
+    )
+
+    with pytest.raises(ValueError, match="disagrees with donor age"):
+        _filter_to_verified_pediatric_models(responses, audit_path)
+
+
+@pytest.mark.parametrize(
+    ("age", "expected"),
+    [("1Y2M", 1 + 2 / 12), ("17Y", 17.0), ("18Y", 18.0), ("unknown", None)],
+)
+def test_parse_cellosaurus_age_years(age, expected):
+    actual = parse_age_years(age)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual == pytest.approx(expected)
 
 
 def test_fold_model_predicts_only_held_out_rows():

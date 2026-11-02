@@ -58,7 +58,7 @@ def predict_expression_response(
 
     if not predictions:
         raise KeyError(f"No trained expression model exists for GDSC2 drug {drug_id!r}.")
-    return {
+    result = {
         "drug_id": str(drug_id),
         "predictions": predictions,
         "training_models": training_models,
@@ -67,3 +67,12 @@ def predict_expression_response(
             "clinical-response prediction."
         ),
     }
+    scope = bundle.get("scope")
+    if isinstance(scope, dict):
+        reported_cancer_types = scope.get("reported_cancer_types")
+        if isinstance(reported_cancer_types, list):
+            result["reported_cancer_types"] = reported_cancer_types
+            result["pediatric_origin_verified"] = bool(
+                scope.get("pediatric_origin_verified", False)
+            )
+    return result

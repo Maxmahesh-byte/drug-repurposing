@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import argparse
 import hashlib
 import json
 from collections import defaultdict
@@ -326,8 +327,185 @@ def _fit_final_models(
     return models
 
 
-def main() -> None:
-    responses = _read_responses()
+def _filter_reported_cancer_types(
+    responses: pd.DataFrame,
+    cancer_types: set[str] | None,
+) -> tuple[pd.DataFrame, set[str] | None]:
+    if cancer_types is None:
+        return responses, None
+
+    normalized = {cancer_type.strip().upper() for cancer_type in cancer_types}
+    if not normalized or "" in normalized:
+        raise ValueError("cancer_types must contain non-empty GDSC2 labels.")
+    filtered = responses.copy()
+    filtered["reported_cancer_type"] = (
+        filtered["reported_cancer_type"].fillna("").astype(str).str.strip().str.upper()
+    )
+    filtered = filtered[filtered["reported_cancer_type"].isin(normalized)].copy()
+    if filtered.empty:
+        raise ValueError(
+            "No GDSC2 response rows matched the requested reported cancer types: "
+            f"{sorted(normalized)}"
+        )
+    return filtered, normalized
+
+
+def _filter_to_verified_pediatric_models(
+    responses: pd.DataFrame,
+    origin_audit_path: Path,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if not origin_audit_path.is_file():
+        raise FileNotFoundError(f"Cell-line origin audit is missing: {origin_audit_path}")
+    origin_audit = pd.read_csv(
+        origin_audit_path,
+        dtype={
+            "sanger_model_id": str,
+            "cell_line": str,
+            "cellosaurus_id": str,
+            "cellosaurus_age": str,
+            "origin_classification": str,
+            "cellosaurus_url": str,
+            "cell_model_passport_url": str,
+        },
+    )
+    required = {
+        "sanger_model_id",
+        "cell_line",
+        "cellosaurus_id",
+        "cellosaurus_age",
+        "age_years",
+        "origin_classification",
+        "cellosaurus_url",
+        "cell_model_passport_url",
+    }
+    absent = required - set(origin_audit.columns)
+    if absent:
+        raise ValueError(f"Origin audit is missing columns: {sorted(absent)}")
+    if origin_audit["sanger_model_id"].isna().any() or origin_audit[
+        "sanger_model_id"
+    ].duplicated().any():
+        raise ValueError("Origin audit must contain one unique Sanger ID per model.")
+
+    for row in origin_audit.itertuples(index=False):
+        if not row.cellosaurus_id.startswith("CVCL_"):
+            raise ValueError(
+                f"Invalid Cellosaurus accession for Sanger model {row.sanger_model_id}."
+            )
+        if not row.cellosaurus_url.startswith(
+            f"https://www.cellosaurus.org/{row.cellosaurus_id}"
+        ):
+            raise ValueError(
+                f"Invalid Cellosaurus record URL for Sanger model {row.sanger_model_id}."
+            )
+        if not row.cell_model_passport_url.startswith(
+            "https://cellmodelpassports.sanger.ac.uk/passports/"
+        ) or not row.cell_model_passport_url.endswith(row.sanger_model_id):
+            raise ValueError(
+                f"Invalid Cell Model Passport URL for Sanger model {row.sanger_model_id}."
+            )
+        try:
+            age_years = float(row.age_years)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid recorded donor age for Sanger model {row.sanger_model_id}."
+            ) from error
+        if not np.isfinite(age_years) or age_years < 0:
+            raise ValueError(
+                f"Invalid recorded donor age for Sanger model {row.sanger_model_id}."
+            )
+        expected_classification = (
+            "confirmed_pediatric" if age_years < 18 else "confirmed_adult"
+        )
+        if row.origin_classification != expected_classification:
+            raise ValueError(
+                f"Origin classification disagrees with donor age for "
+                f"Sanger model {row.sanger_model_id}."
+            )
+
+    pediatric = origin_audit[
+        origin_audit["origin_classification"].eq("confirmed_pediatric")
+    ]
+    if pediatric.empty:
+        raise ValueError("Origin audit contains no age-confirmed pediatric models.")
+    audit_identity = pediatric.set_index("sanger_model_id")["cell_line"].to_dict()
+    selected = responses[
+        responses["sanger_model_id"].isin(audit_identity)
+    ].copy()
+    observed_identity = selected.groupby("sanger_model_id")["cell_line"].agg(
+        lambda values: set(values)
+    )
+    mismatches = {
+        model_id: sorted(names)
+        for model_id, names in observed_identity.items()
+        if names != {audit_identity[model_id]}
+    }
+    if mismatches:
+        raise ValueError(
+            f"GDSC2 cell-line identity differs from origin audit: {mismatches}"
+        )
+    if selected["sanger_model_id"].nunique() != len(pediatric):
+        missing_ids = sorted(set(audit_identity) - set(selected["sanger_model_id"]))
+        raise ValueError(
+            f"Age-confirmed models are absent from selected GDSC2 responses: {missing_ids}"
+        )
+
+    scope = {
+        "pediatric_origin_verified": True,
+        "age_cutoff_years": 18,
+        "origin_audit_source": str(origin_audit_path),
+        "cellosaurus_records": len(pediatric),
+        "included_sanger_model_ids": sorted(audit_identity),
+        "excluded_confirmed_adult_models": int(
+            origin_audit["origin_classification"].eq("confirmed_adult").sum()
+        ),
+    }
+    return selected, scope
+
+
+def main(
+    cancer_types: set[str] | None = None,
+    output_prefix: str | None = None,
+    model_origin_audit: Path | None = None,
+) -> None:
+    responses, normalized_cancer_types = _filter_reported_cancer_types(
+        _read_responses(), cancer_types
+    )
+    origin_scope: dict[str, Any] = {
+        "pediatric_origin_verified": False,
+        "age_cutoff_years": None,
+        "origin_audit_source": None,
+        "cellosaurus_records": 0,
+        "included_sanger_model_ids": [],
+        "excluded_confirmed_adult_models": 0,
+    }
+    if model_origin_audit is not None:
+        responses, origin_scope = _filter_to_verified_pediatric_models(
+            responses, model_origin_audit
+        )
+        if normalized_cancer_types is not None:
+            responses = responses[
+                responses["reported_cancer_type"].isin(normalized_cancer_types)
+            ].copy()
+            if responses.empty:
+                raise ValueError(
+                    "No age-confirmed pediatric models match the requested reported "
+                    f"cancer types: {sorted(normalized_cancer_types)}"
+                )
+
+    model_output = MODEL_OUTPUT
+    summary_output = SUMMARY_OUTPUT
+    prediction_outputs = PREDICTION_OUTPUTS
+    if output_prefix is not None:
+        safe_prefix = output_prefix.strip()
+        if not safe_prefix or Path(safe_prefix).name != safe_prefix:
+            raise ValueError("output_prefix must be a non-empty filename prefix.")
+        model_output = OUTPUT_DIR / f"{safe_prefix}.json"
+        summary_output = OUTPUT_DIR / f"{safe_prefix}_summary.json"
+        prediction_outputs = {
+            endpoint: OUTPUT_DIR / f"{safe_prefix}_{endpoint}_oof_predictions.csv"
+            for endpoint in TARGETS
+        }
+
     sample_labels, gene_ids, expression, expression_digest = _read_expression_matrix()
     model_to_expression, crosswalk = _build_exact_name_crosswalk(
         responses, sample_labels
@@ -347,11 +525,20 @@ def main() -> None:
     ]
     model_order = sorted(model_to_expression)
     model_to_row = {model_id: index for index, model_id in enumerate(model_order)}
+    if model_origin_audit is not None:
+        fold_by_model = {
+            model_id: fold
+            for fold, model_id in enumerate(model_order, start=1)
+        }
+        matched["fold"] = matched["sanger_model_id"].map(fold_by_model)
+        n_splits = len(model_order)
+    else:
+        n_splits = N_SPLITS
     output_frames: dict[str, pd.DataFrame] = {}
     fold_feature_ids: dict[str, list[str]] = {}
     fold_reports: list[dict[str, Any]] = []
 
-    for fold in range(1, N_SPLITS + 1):
+    for fold in range(1, n_splits + 1):
         train_models = sorted(
             model_id for model_id in model_order if int(fold_by_model[model_id]) != fold
         )
@@ -434,7 +621,7 @@ def main() -> None:
                 - baseline_metrics["baseline_drug_cancer_median"]["macro_drug_mae"]
             ),
         }
-        frame.to_csv(PREDICTION_OUTPUTS[endpoint], index=False)
+        frame.to_csv(prediction_outputs[endpoint], index=False)
 
     final_models = _fit_final_models(
         matched, expression, gene_ids, model_to_expression
@@ -449,20 +636,39 @@ def main() -> None:
         "response_source": str(RESPONSE_SOURCE.relative_to(ROOT)),
         "response_source_sha256": source_digest,
         "matching": "case-insensitive exact cell-line name; ambiguous names excluded",
-        "training_scope": "known GDSC2 drugs; new cell lines represented by RNA-seq TPM",
+        "training_scope": (
+            "known GDSC2 drugs; new cell lines represented by RNA-seq TPM"
+            if normalized_cancer_types is None
+            else (
+                "known GDSC2 drugs; training restricted to reported cancer types "
+                f"{sorted(normalized_cancer_types)}; new cell lines represented by RNA-seq TPM"
+            )
+        ),
         "feature_transform": "log2(TPM + 1), then training-cohort z-score",
         "feature_selection": f"top {N_FEATURES} variable genes in training cohort",
         "ridge_alpha": RIDGE_ALPHA,
         "minimum_training_models_per_drug": MIN_TRAIN_MODELS,
+        "scope": {
+            "reported_cancer_types": (
+                sorted(normalized_cancer_types)
+                if normalized_cancer_types is not None
+                else None
+            ),
+            **origin_scope,
+        },
         "targets": final_models,
     }
-    MODEL_OUTPUT.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    model_output.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     summary = {
         "status": "evaluated",
         "crosswalk": crosswalk,
         "matched_response_rows": int(len(matched)),
         "matched_drugs": int(matched["drug_id"].nunique()),
-        "fold_method": "existing five-fold GroupKFold by Sanger model ID",
+        "fold_method": (
+            "leave-one-Sanger-model-ID-out"
+            if model_origin_audit is not None
+            else "existing five-fold GroupKFold by Sanger model ID"
+        ),
         "folds": fold_reports,
         "fold_feature_ids": fold_feature_ids,
         "model": {
@@ -474,11 +680,6 @@ def main() -> None:
             "response_target_used_as_feature": False,
         },
         "metrics": endpoint_metrics,
-        "outputs": {
-            "model_bundle": str(MODEL_OUTPUT.relative_to(ROOT)),
-            "ln_ic50_predictions": str(PREDICTION_OUTPUTS["ln_ic50"].relative_to(ROOT)),
-            "auc_predictions": str(PREDICTION_OUTPUTS["auc"].relative_to(ROOT)),
-        },
         "interpretation": (
             "This is an exploratory benchmark for known drugs on an exact-name-matched "
             "subset of cell lines. It does not validate unseen-drug generalisation, "
@@ -487,9 +688,38 @@ def main() -> None:
             "cell lines and independent validation."
         ),
     }
-    SUMMARY_OUTPUT.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    summary["outputs"] = {
+        "model_bundle": str(model_output.relative_to(ROOT)),
+        "ln_ic50_predictions": str(prediction_outputs["ln_ic50"].relative_to(ROOT)),
+        "auc_predictions": str(prediction_outputs["auc"].relative_to(ROOT)),
+    }
+    summary["scope"] = bundle["scope"]
+    summary_output.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--cancer-types",
+        nargs="+",
+        help="Restrict training to these reported GDSC2 cancer labels.",
+    )
+    parser.add_argument(
+        "--output-prefix",
+        help="Write scoped model and predictions under this filename prefix.",
+    )
+    parser.add_argument(
+        "--model-origin-audit",
+        type=Path,
+        help=(
+            "Restrict training to models with source-backed pediatric age "
+            "classifications from the Cellosaurus origin audit."
+        ),
+    )
+    arguments = parser.parse_args()
+    main(
+        cancer_types=set(arguments.cancer_types) if arguments.cancer_types else None,
+        output_prefix=arguments.output_prefix,
+        model_origin_audit=arguments.model_origin_audit,
+    )

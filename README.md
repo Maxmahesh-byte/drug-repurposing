@@ -48,4 +48,16 @@ At the initial audit, case-insensitive exact cell-line names matched 528 of 969 
 
 The Streamlit dashboard includes a separate **Molecular response model** workspace for running the benchmark, reviewing results, and optionally estimating response from an uploaded cell-line TPM profile after a trained model bundle exists.
 
+For an explicitly scoped benchmark using only cell lines whose source-donor age is documented as under 18 in Cellosaurus and whose Sanger model IDs match GDSC2:
+
+```bash
+./.venv/bin/python -m scripts.ai.audit_gdsc2_model_origins
+./.venv/bin/python scripts/ai/train_gdsc2_expression_model.py \
+  --cancer-types NB MB ALL \
+  --model-origin-audit reports/gdsc2_pediatric_model_origin_audit.csv \
+  --output-prefix gdsc2_pediatric_origin_verified_expression_ridge
+```
+
+The origin audit queries the Cellosaurus API and verifies the stable Cell Model Passport ID cross-reference. The model uses leave-one-Sanger-model-ID-out evaluation. Here, "pediatric-origin verified" means Cellosaurus documents a source-donor age under 18; it does not establish clinical response prediction. The model remains a small cell-line benchmark for known drugs, not a patient-response or treatment-selection tool. The origin evidence and scope are recorded with the results.
+
 Combination-response modeling remains separate: no combination/synergy response dataset is currently present in `data/`. Such a model requires measured drug-pair outcomes and pair-aware validation; single-agent labels are not treated as combination labels.
