@@ -93,14 +93,29 @@ def _read_responses() -> pd.DataFrame:
     return responses
 
 
-def _read_expression_matrix() -> tuple[list[str], list[str], np.ndarray, str]:
-    request = requests.get(
-        EXPRESSION_URL,
-        headers={"User-Agent": "drug-repurposing-research/0.1"},
-        stream=True,
-        timeout=(15, 120),
-    )
-    request.raise_for_status()
+def _read_expression_matrix(
+    expression_file: Path | None = None,
+) -> tuple[list[str], list[str], np.ndarray, str]:
+    """Read E-MTAB-2770 TPM data locally or stream it from Expression Atlas."""
+    if expression_file is None:
+        request = requests.get(
+            EXPRESSION_URL,
+            headers={"User-Agent": "drug-repurposing-research/0.1"},
+            stream=True,
+            timeout=(15, 120),
+        )
+        request.raise_for_status()
+        line_iterator = request.iter_lines(chunk_size=1024 * 1024)
+        close_input = request.close
+    else:
+        local_path = Path(expression_file).expanduser()
+        if not local_path.is_file():
+            raise FileNotFoundError(
+                f"Expression matrix file is missing: {local_path}"
+            )
+        local_handle = local_path.open("rb")
+        line_iterator = local_handle
+        close_input = local_handle.close
 
     sample_labels: list[str] | None = None
     gene_ids: list[str] = []
@@ -109,10 +124,11 @@ def _read_expression_matrix() -> tuple[list[str], list[str], np.ndarray, str]:
     digest = hashlib.sha256()
 
     try:
-        for raw_line in request.iter_lines(chunk_size=1024 * 1024):
+        for source_line in line_iterator:
+            raw_line = source_line.rstrip(b"\\r\\n")
             if not raw_line or raw_line.startswith(b"#"):
                 continue
-            row = next(csv.reader([raw_line.decode("utf-8")], delimiter="\t"))
+            row = next(csv.reader([raw_line.decode("utf-8")], delimiter="\\t"))
             if sample_labels is None:
                 if row[:2] != ["Gene ID", "Gene Name"]:
                     raise ValueError("Unexpected Expression Atlas matrix header.")
@@ -122,7 +138,7 @@ def _read_expression_matrix() -> tuple[list[str], list[str], np.ndarray, str]:
                         f"Expected 1,019 expression samples, found {len(sample_labels)}."
                     )
                 digest.update(raw_line)
-                digest.update(b"\n")
+                digest.update(b"\\n")
                 continue
 
             if len(row) != len(sample_labels) + 2:
@@ -146,18 +162,26 @@ def _read_expression_matrix() -> tuple[list[str], list[str], np.ndarray, str]:
             if not np.isfinite(values).all() or np.any(values < 0):
                 raise ValueError(f"Invalid TPM values for gene {gene_id}.")
             digest.update(raw_line)
-            digest.update(b"\n")
+            digest.update(b"\\n")
             log_values = np.log2(values + 1.0).astype(np.float32)
             if np.ptp(log_values) > 0:
                 gene_ids.append(gene_id)
                 gene_rows.append(log_values)
     finally:
-        request.close()
+        close_input()
 
     if sample_labels is None or not gene_rows:
         raise ValueError("Expression Atlas returned no usable expression matrix.")
     return sample_labels, gene_ids, np.stack(gene_rows), digest.hexdigest()
 
+
+def _sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 def _build_exact_name_crosswalk(
     responses: pd.DataFrame, sample_labels: list[str]
@@ -466,6 +490,7 @@ def main(
     cancer_types: set[str] | None = None,
     output_prefix: str | None = None,
     model_origin_audit: Path | None = None,
+    expression_file: Path | None = None,
 ) -> None:
     responses, normalized_cancer_types = _filter_reported_cancer_types(
         _read_responses(), cancer_types
@@ -506,7 +531,24 @@ def main(
             for endpoint in TARGETS
         }
 
-    sample_labels, gene_ids, expression, expression_digest = _read_expression_matrix()
+    sample_labels, gene_ids, expression, expression_digest = _read_expression_matrix(
+        expression_file
+    )
+    expression_input: dict[str, Any] = {
+        "mode": "local_file" if expression_file is not None else "remote_stream",
+        "file_path": None,
+        "file_sha256": None,
+        "parsed_content_sha256": expression_digest,
+    }
+    if expression_file is not None:
+        resolved_expression_file = Path(expression_file).expanduser().resolve()
+        try:
+            expression_input["file_path"] = str(
+                resolved_expression_file.relative_to(ROOT)
+            )
+        except ValueError:
+            expression_input["file_path"] = resolved_expression_file.name
+        expression_input["file_sha256"] = _sha256_file(resolved_expression_file)
     model_to_expression, crosswalk = _build_exact_name_crosswalk(
         responses, sample_labels
     )
@@ -633,6 +675,7 @@ def main(
         "expression_source": "Expression Atlas E-MTAB-2770",
         "expression_url": EXPRESSION_URL,
         "expression_gene_rows_sha256": expression_digest,
+        "expression_input": expression_input,
         "response_source": str(RESPONSE_SOURCE.relative_to(ROOT)),
         "response_source_sha256": source_digest,
         "matching": "case-insensitive exact cell-line name; ambiguous names excluded",
@@ -661,6 +704,7 @@ def main(
     model_output.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     summary = {
         "status": "evaluated",
+        "expression_input": expression_input,
         "crosswalk": crosswalk,
         "matched_response_rows": int(len(matched)),
         "matched_drugs": int(matched["drug_id"].nunique()),
@@ -710,6 +754,14 @@ if __name__ == "__main__":
         help="Write scoped model and predictions under this filename prefix.",
     )
     parser.add_argument(
+        "--expression-file",
+        type=Path,
+        help=(
+            "Read a local E-MTAB-2770 TPM matrix instead of streaming it "
+            "from Expression Atlas."
+        ),
+    )
+    parser.add_argument(
         "--model-origin-audit",
         type=Path,
         help=(
@@ -722,4 +774,5 @@ if __name__ == "__main__":
         cancer_types=set(arguments.cancer_types) if arguments.cancer_types else None,
         output_prefix=arguments.output_prefix,
         model_origin_audit=arguments.model_origin_audit,
+        expression_file=arguments.expression_file,
     )
