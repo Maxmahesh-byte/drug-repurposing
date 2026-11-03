@@ -57,8 +57,9 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         node_type: [str(value) for value in graph[node_type].node_ids]
         for node_type in NODE_TYPES
     }
-    if len(node_ids["drug"]) != len(set(node_ids["drug"])):
-        raise ValueError("Drug graph contains duplicate drug node IDs.")
+    for node_type, values in node_ids.items():
+        if len(values) != len(set(values)):
+            raise ValueError(f"{node_type} graph contains duplicate node IDs.")
     if not node_ids["drug"]:
         raise ValueError("Typed graph contains no drug nodes.")
 
@@ -67,6 +68,14 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         edge_index = graph[edge_type_lookup[relation]].edge_index.detach().cpu().long()
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError(f"Invalid edge_index shape for relation {relation}.")
+        source_type, _, target_type = relation
+        if edge_index.numel():
+            if int(edge_index.min()) < 0:
+                raise ValueError(f"Negative node index in relation {relation}.")
+            if int(edge_index[0].max()) >= len(node_ids[source_type]):
+                raise ValueError(f"Source node index out of range in relation {relation}.")
+            if int(edge_index[1].max()) >= len(node_ids[target_type]):
+                raise ValueError(f"Target node index out of range in relation {relation}.")
         raw_edges[relation] = edge_index
 
     # Build only the connected entity subset needed for drug mechanism paths.
@@ -162,8 +171,69 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     )
 
 
+def summarize_drug_evidence_coverage(graph: CompactDrugGraph) -> dict[str, Any]:
+    """Count drug nodes with complete evidence paths in the response-free graph."""
+    edge_arrays = {
+        relation_index: graph.edge_index[:, graph.edge_type == relation_index]
+        for relation_index in range(len(RELATIONS))
+    }
+
+    drug_to_molecules: dict[int, set[int]] = {}
+    for drug_index, molecule_index in edge_arrays[0].t().tolist():
+        drug_to_molecules.setdefault(int(drug_index), set()).add(int(molecule_index))
+
+    molecule_to_targets: dict[int, set[int]] = {}
+    for molecule_index, target_index in edge_arrays[1].t().tolist():
+        molecule_to_targets.setdefault(int(molecule_index), set()).add(int(target_index))
+
+    target_to_genes: dict[int, set[int]] = {}
+    for target_index, gene_index in edge_arrays[2].t().tolist():
+        target_to_genes.setdefault(int(target_index), set()).add(int(gene_index))
+
+    drugs_with_molecule = set(drug_to_molecules)
+    drugs_with_target: set[int] = set()
+    drugs_with_gene: set[int] = set()
+    for drug_index, molecules in drug_to_molecules.items():
+        targets = {
+            target_index
+            for molecule_index in molecules
+            for target_index in molecule_to_targets.get(molecule_index, set())
+        }
+        if targets:
+            drugs_with_target.add(drug_index)
+        if any(target_to_genes.get(target_index) for target_index in targets):
+            drugs_with_gene.add(drug_index)
+
+    total_drugs = len(graph.drug_ids)
+
+    def record(indices: set[int]) -> dict[str, Any]:
+        return {
+            "count": len(indices),
+            "fraction_of_all_graph_drugs": (
+                float(len(indices) / total_drugs) if total_drugs else 0.0
+            ),
+            "drug_ids": [graph.drug_ids[index] for index in sorted(indices)],
+        }
+
+    return {
+        "total_graph_drugs": total_drugs,
+        "drug_with_chembl_molecule_mapping": record(drugs_with_molecule),
+        "drug_with_direct_target_path": record(drugs_with_target),
+        "drug_with_gene_level_path": record(drugs_with_gene),
+        "interpretation": (
+            "A complete gene-level path is drug -> ChEMBL molecule -> direct "
+            "mechanism target -> gene. Counts are graph-evidence coverage, not "
+            "proof that the mechanism is active in a cell line."
+        ),
+    }
+
+
 class DrugCellLinePairGNN(nn.Module):
-    """RGCN drug encoder + expression MLP + pairwise dual-endpoint head."""
+    """Three-layer RGCN drug encoder + expression MLP + pairwise dual-endpoint head.
+
+    Three message-passing layers are required for a gene to traverse the full
+    reverse evidence path gene -> target -> ChEMBL molecule -> drug.
+    """
 
     def __init__(
         self,
@@ -195,6 +265,11 @@ class DrugCellLinePairGNN(nn.Module):
         )
         self.drug_norm1 = nn.LayerNorm(hidden_dim)
         self.drug_norm2 = nn.LayerNorm(hidden_dim)
+        self.drug_conv3 = RGCNConv(
+            hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_bases
+        )
+        self.drug_norm3 = nn.LayerNorm(hidden_dim)
+        self.num_message_passing_layers = 3
 
         self.cell_encoder = nn.Sequential(
             nn.Linear(num_expression_features, hidden_dim * 2),
@@ -233,6 +308,8 @@ class DrugCellLinePairGNN(nn.Module):
         hidden = F.dropout(hidden, p=self.dropout, training=self.training)
         hidden2 = self.drug_conv2(hidden, edge_index, edge_type)
         hidden = self.drug_norm2(F.relu(hidden2 + hidden))
+        hidden3 = self.drug_conv3(hidden, edge_index, edge_type)
+        hidden = self.drug_norm3(F.relu(hidden3 + hidden))
         return hidden[: self.num_drugs], self.cell_encoder(expression_features)
 
     def score_pairs(

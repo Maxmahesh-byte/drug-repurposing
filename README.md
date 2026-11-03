@@ -159,3 +159,24 @@ To reuse the existing seed-42 ablation OOF output and train four additional seed
 The orchestrator trains the full-graph, drug-ID-only, and expression-only variants for each additional seed. It checks that every OOF file contains the same response curve IDs, Sanger model IDs, frozen outer-fold assignments, and observed response labels as the reference seed. Inner validation groups and initialisation vary with seed, while the outer test folds stay fixed. It then invokes `analyze_gdsc2_pair_gnn_uncertainty.py` across all OOF runs and saves a manifest plus bootstrap results.
 
 Each seed is written into a separate directory; existing outputs are not overwritten unless `--overwrite` is specified. A new run therefore does not replace the original seed-42 results. The cell-line cluster bootstrap remains conditional on each fitted model; repeated seeds are summarised separately to show sensitivity to training randomness.
+
+
+### GDSC2 pair-GNN leakage and evaluation audit
+
+The current audit changes and test coverage are documented in [reports/gdsc2_pair_gnn_leakage_audit.md](reports/gdsc2_pair_gnn_leakage_audit.md). The compact model graph uses only drug→ChEMBL molecule→direct target→gene evidence and excludes the GDSC2 response relation and its response-valued edge attributes. Three RGCN layers allow gene-node information to traverse the full reverse evidence path back to drug nodes.
+
+The ablation runner now validates that every response pair's expression row index maps to its Sanger model ID, that its graph node ID is the expected namespaced cell-line ID, and that Sanger groups are disjoint across inner-fit, inner-validation, and outer-test partitions. Expression selection/scaling and separate endpoint target scaling are fitted on inner-fit data only. Test-row labels are not converted to training tensors. Baseline joins also validate curve IDs, Sanger IDs, frozen folds, and observed targets. The run summary reports how many drugs have a ChEMBL mapping, a direct target path, and a complete gene-level path.
+
+**Evaluation caveat:** GNN gradient updates use the inner-fit subset, while existing Ridge and drug+cancer median baselines use the full outer-training fold. They share held-out curves and folds, but not the same amount of training data. A follow-up refit on the full outer-training fold after inner validation selects the training epoch would make the estimator comparison more closely matched. The five-seed metrics from the earlier two-layer model do not describe this revised three-layer architecture.
+
+
+For a new architecture revision (for example, the audited three-layer encoder), do not reuse OOF predictions from the earlier two-layer model. Train a fresh seed set into a new output directory:
+
+```bash
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_multiseed.py \
+  --fresh-run-set \
+  --seeds 42 43 44 45 46 \
+  --output-root data/ai/gdsc2_pair_gnn_multiseed_3layer
+```
+
+The `--fresh-run-set` option ignores the script's default seed-42 reference OOF file and trains all five supplied seeds from scratch. Keep this output separate from the previous two-layer `gdsc2_pair_gnn_multiseed` directory.

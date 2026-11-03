@@ -53,8 +53,22 @@ def select_and_scale_expression(
     train_model_ids: set[str],
     top_k: int,
 ) -> tuple[np.ndarray, dict]:
+    if expression.ndim != 2 or expression.shape[0] != len(model_ids):
+        raise ValueError("Expression rows must align with Sanger model IDs.")
+    if top_k <= 0:
+        raise ValueError("top_k must be positive.")
+    canonical_model_ids = [str(value).strip() for value in model_ids.tolist()]
+    if any(not value for value in canonical_model_ids):
+        raise ValueError("Expression metadata contains blank Sanger model IDs.")
+    if len(canonical_model_ids) != len(set(canonical_model_ids)):
+        raise ValueError("Expression metadata contains duplicate Sanger model IDs.")
+    missing_training_ids = sorted(set(train_model_ids) - set(canonical_model_ids))
+    if missing_training_ids:
+        raise ValueError(
+            f"Training model IDs are absent from expression metadata: {missing_training_ids[:10]}"
+        )
     train_indices = np.asarray(
-        [i for i, model_id in enumerate(model_ids.astype(str)) if model_id in train_model_ids],
+        [i for i, model_id in enumerate(canonical_model_ids) if model_id in train_model_ids],
         dtype=np.int64,
     )
     if len(train_indices) < 3:
@@ -76,7 +90,9 @@ def select_and_scale_expression(
         "selected_feature_count": int(k),
         "selected_gene_indices": ranked.astype(int).tolist(),
         "training_cell_lines_for_scaler": int(len(train_indices)),
-        "fit_scope": "outer-fold training cell lines only",
+        "fit_scope": "inner-fit cell lines only",
+        "scaler_mean": mean.astype(float).tolist(),
+        "scaler_scale": scale.astype(float).tolist(),
     }
     return transformed.astype(np.float32), metadata
 
