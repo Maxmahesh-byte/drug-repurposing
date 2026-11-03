@@ -57,8 +57,9 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         node_type: [str(value) for value in graph[node_type].node_ids]
         for node_type in NODE_TYPES
     }
-    if len(node_ids["drug"]) != len(set(node_ids["drug"])):
-        raise ValueError("Drug graph contains duplicate drug node IDs.")
+    for node_type, values in node_ids.items():
+        if len(values) != len(set(values)):
+            raise ValueError(f"{node_type} graph contains duplicate node IDs.")
     if not node_ids["drug"]:
         raise ValueError("Typed graph contains no drug nodes.")
 
@@ -67,6 +68,14 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         edge_index = graph[edge_type_lookup[relation]].edge_index.detach().cpu().long()
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError(f"Invalid edge_index shape for relation {relation}.")
+        source_type, _, target_type = relation
+        if edge_index.numel():
+            if int(edge_index.min()) < 0:
+                raise ValueError(f"Negative node index in relation {relation}.")
+            if int(edge_index[0].max()) >= len(node_ids[source_type]):
+                raise ValueError(f"Source node index out of range in relation {relation}.")
+            if int(edge_index[1].max()) >= len(node_ids[target_type]):
+                raise ValueError(f"Target node index out of range in relation {relation}.")
         raw_edges[relation] = edge_index
 
     # Build only the connected entity subset needed for drug mechanism paths.
