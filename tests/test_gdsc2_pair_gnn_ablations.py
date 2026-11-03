@@ -6,7 +6,9 @@ import torch
 from scripts.ai.run_gdsc2_pair_gnn_ablations import (
     compare_external_baselines,
     fit_target_scaler,
+    prepare_full_outer_refit,
     split_outer_fold_rows,
+    validate_full_outer_refit_partition,
     validate_pair_expression_alignment,
 )
 from scripts.ai.train_gdsc2_pair_gnn import select_and_scale_expression
@@ -216,3 +218,62 @@ def test_external_baseline_comparison_checks_cell_line_identity(tmp_path):
                 )
             },
         )
+
+
+
+def test_full_outer_refit_uses_all_outer_training_cell_lines_and_rows():
+    pairs = _pair_rows_for_fold_test()
+    fit_rows, val_rows, test_rows = split_outer_fold_rows(
+        pairs, fold=1, validation_fraction=0.25, seed=91
+    )
+    outer_train = pairs[pairs["fold"] != 1].copy()
+    train_groups = validate_full_outer_refit_partition(
+        fit_rows, val_rows, outer_train, test_rows
+    )
+    assert train_groups == set(outer_train["sanger_model_id"])
+    assert len(train_groups) == outer_train["sanger_model_id"].nunique()
+    assert train_groups.isdisjoint(set(test_rows["sanger_model_id"]))
+
+
+def test_full_outer_refit_preprocessing_uses_all_train_rows_not_test_rows():
+    pairs = _pair_rows_for_fold_test()
+    fit_rows, val_rows, test_rows = split_outer_fold_rows(
+        pairs, fold=1, validation_fraction=0.25, seed=92
+    )
+    outer_train = pairs[pairs["fold"] != 1].copy()
+    model_ids = np.asarray([
+        f"SIDM_{fold}_{index}"
+        for fold in range(1, 6)
+        for index in range(2)
+    ])
+    rng = np.random.default_rng(19)
+    expression = rng.normal(size=(10, 8)).astype(np.float32)
+
+    first = prepare_full_outer_refit(
+        expression, model_ids, outer_train, test_rows, top_k_genes=5
+    )
+    changed_expression = expression.copy()
+    test_ids = set(test_rows["sanger_model_id"])
+    for index, model_id in enumerate(model_ids):
+        if model_id in test_ids:
+            changed_expression[index] = np.linspace(
+                -1e6, 1e6, changed_expression.shape[1]
+            )
+    changed_test_rows = test_rows.copy()
+    changed_test_rows["ln_ic50"] = 1e9
+    changed_test_rows["auc"] = -1e9
+    second = prepare_full_outer_refit(
+        changed_expression, model_ids, outer_train, changed_test_rows,
+        top_k_genes=5,
+    )
+
+    first_expression, first_meta, first_mean, first_scale = first
+    second_expression, second_meta, second_mean, second_scale = second
+    assert first_meta["fit_scope"] == "complete outer-training cell lines"
+    assert first_meta["training_cell_lines_for_scaler"] == outer_train["sanger_model_id"].nunique()
+    assert first_meta["selected_gene_indices"] == second_meta["selected_gene_indices"]
+    assert np.allclose(first_meta["scaler_mean"], second_meta["scaler_mean"])
+    assert np.allclose(first_meta["scaler_scale"], second_meta["scaler_scale"])
+    assert np.allclose(first_mean, second_mean)
+    assert np.allclose(first_scale, second_scale)
+    assert np.allclose(first_expression, second_expression)
