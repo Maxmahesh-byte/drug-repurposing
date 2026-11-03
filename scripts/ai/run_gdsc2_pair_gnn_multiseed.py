@@ -78,6 +78,26 @@ def validate_oof_file(path: Path, reference: pd.DataFrame | None = None) -> pd.D
     return frame
 
 
+def resolve_reference_run(
+    reference: Path,
+    *,
+    fresh_run_set: bool,
+    require_reference: bool,
+) -> tuple[list[Path], pd.DataFrame | None]:
+    """Return the prior reference only when the caller explicitly permits reuse."""
+    if fresh_run_set:
+        if require_reference:
+            raise ValueError("--fresh-run-set cannot be combined with --require-reference.")
+        return [], None
+    existing_runs = [reference] if reference.is_file() else []
+    reference_frame = validate_oof_file(reference) if existing_runs else None
+    if require_reference and reference_frame is None:
+        raise FileNotFoundError(
+            f"Reference OOF predictions are required: {reference}"
+        )
+    return existing_runs, reference_frame
+
+
 def run_command(command: list[str]) -> None:
     print("\n$ " + " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT, check=True)
@@ -94,19 +114,16 @@ def main(args) -> dict:
         if not path.exists():
             raise FileNotFoundError(f"Required path not found: {path}")
 
-    existing_runs = [reference] if reference.is_file() else []
-    reference_frame = (
-        validate_oof_file(reference) if existing_runs else None
+    existing_runs, reference_frame = resolve_reference_run(
+        reference,
+        fresh_run_set=args.fresh_run_set,
+        require_reference=args.require_reference,
     )
-    if args.require_reference and reference_frame is None:
-        raise FileNotFoundError(
-            f"Reference seed-42 OOF predictions are required: {reference}"
-        )
 
     seeds = list(args.seeds)
     if len(seeds) != len(set(seeds)):
         raise ValueError("Seed values must be unique.")
-    if args.reference_seed in seeds:
+    if existing_runs and args.reference_seed in seeds:
         raise ValueError(
             f"Seed {args.reference_seed} is already represented by --reference-oof; "
             "do not train it a second time in this run."
@@ -163,7 +180,9 @@ def main(args) -> dict:
         "status": "completed",
         "reference_run": str(reference) if existing_runs else None,
         "reference_seed": args.reference_seed if existing_runs else None,
-        "additional_seeds_trained": seeds,
+        "fresh_run_set": bool(args.fresh_run_set),
+        "trained_seeds": seeds,
+        "additional_seeds_trained": seeds if existing_runs else [],
         "oof_runs_included": [str(path) for path in all_runs],
         "all_runs_validated_same_curve_ids_folds_and_observed_targets": True,
         "same_outer_split": "frozen five-fold GroupKFold by Sanger model ID; folds 1-5",
@@ -201,6 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--reference-oof", type=Path, default=DEFAULT_REFERENCE)
     parser.add_argument("--reference-seed", type=int, default=42)
     parser.add_argument("--require-reference", action="store_true")
+    parser.add_argument("--fresh-run-set", action="store_true", help="Ignore all prior OOF files and train every supplied seed from scratch.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[43, 44, 45, 46])
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=12)
