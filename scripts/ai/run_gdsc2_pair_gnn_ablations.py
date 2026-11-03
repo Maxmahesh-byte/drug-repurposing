@@ -104,9 +104,11 @@ def validate_pair_expression_alignment(
         raise ValueError(
             "expression_row_index does not match the NPZ row for its Sanger model ID."
         )
+    raw_graph_ids = pairs["graph_node_id"].astype(str)
+    if not raw_graph_ids.equals(raw_graph_ids.str.strip()):
+        raise ValueError("Response-pair graph node IDs contain surrounding whitespace.")
     expected_graph_ids = pair_ids.map(lambda value: f"GDSC_MODEL:{value}")
-    observed_graph_ids = pairs["graph_node_id"].astype(str).str.strip()
-    if not observed_graph_ids.equals(expected_graph_ids):
+    if not raw_graph_ids.equals(expected_graph_ids):
         raise ValueError("graph_node_id does not match its Sanger model ID.")
     folds = pd.to_numeric(pairs["fold"], errors="coerce")
     if folds.isna().any() or not folds.isin(range(1, 6)).all():
@@ -388,7 +390,9 @@ def compare_external_baselines(
             path,
             dtype={"curve_id": str, "drug_id": str, "sanger_model_id": str},
         )
-        required = {"curve_id", "fold", prediction_column, actual_column}
+        required = {
+            "curve_id", "fold", "sanger_model_id", prediction_column, actual_column
+        }
         if required - set(baseline.columns):
             comparisons[name] = {
                 "status": "missing_required_columns",
@@ -402,9 +406,17 @@ def compare_external_baselines(
         endpoint = "ln_ic50" if "ln_ic50" in name else "auc"
         variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
         selected_baseline = baseline[
-            ["curve_id", "fold", actual_column, prediction_column]
-        ].rename(columns={actual_column: "comparator_actual"})
-        joined = oof[["curve_id", "fold", f"actual_{endpoint}", *variant_cols]].merge(
+            ["curve_id", "fold", "sanger_model_id", actual_column, prediction_column]
+        ].rename(
+            columns={
+                "fold": "fold_baseline",
+                "sanger_model_id": "sanger_model_id_baseline",
+                actual_column: "comparator_actual",
+            }
+        )
+        joined = oof[
+            ["curve_id", "fold", "sanger_model_id", f"actual_{endpoint}", *variant_cols]
+        ].merge(
             selected_baseline,
             on="curve_id",
             how="inner",
@@ -420,6 +432,11 @@ def compare_external_baselines(
         )
         if not fold_match:
             raise ValueError(f"Fold assignments differ in comparator {name}.")
+        model_id_match = joined["sanger_model_id"].astype(str).equals(
+            joined["sanger_model_id_baseline"].astype(str)
+        )
+        if not model_id_match:
+            raise ValueError(f"Sanger model IDs differ in comparator {name}.")
         # Ensure both files agree on the measured target before scoring.
         actual_oof = joined[f"actual_{endpoint}"].to_numpy(dtype=float)
         actual_comparator = joined["comparator_actual"].to_numpy(dtype=float)
@@ -441,6 +458,7 @@ def compare_external_baselines(
             "total_oof_rows": int(len(oof)),
             "coverage_fraction": float(len(joined) / len(oof)),
             "fold_assignments_identical": fold_match,
+            "sanger_model_ids_identical": model_id_match,
             "measured_targets_identical": True,
             "metrics": prediction_metrics,
         }
@@ -468,6 +486,13 @@ def main(args) -> dict:
         model_ids = archive["sanger_model_ids"].astype(str)
     if expression.shape != (len(model_ids), len(gene_ids)):
         raise ValueError("Expression matrix dimensions do not align with metadata.")
+    if not np.isfinite(expression).all():
+        raise ValueError("Expression matrix contains non-finite values.")
+    canonical_gene_ids = [str(value).strip() for value in gene_ids.tolist()]
+    if any(not value for value in canonical_gene_ids):
+        raise ValueError("Expression gene IDs contain blank identifiers.")
+    if len(canonical_gene_ids) != len(set(canonical_gene_ids)):
+        raise ValueError("Expression gene IDs contain duplicates.")
     if pairs["curve_id"].duplicated().any():
         raise ValueError("Response-pair table contains duplicate curve IDs.")
     if set(pairs["fold"].unique()) != set(range(1, 6)):
