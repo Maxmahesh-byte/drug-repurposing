@@ -72,3 +72,25 @@ def test_oof_file_validator_rejects_nonfinite_predictions(tmp_path):
     frame.to_csv(path, index=False)
     with pytest.raises(ValueError, match="non-finite"):
         MODULE.validate_oof_file(path)
+
+
+
+def test_fresh_run_set_ignores_existing_two_layer_reference(tmp_path):
+    old_reference = tmp_path / "old_two_layer_oof.csv"
+    old_reference.write_text("this file must not be read in fresh mode", encoding="utf-8")
+    existing_runs, reference_frame = MODULE.resolve_reference_run(
+        old_reference,
+        fresh_run_set=True,
+        require_reference=False,
+    )
+    assert existing_runs == []
+    assert reference_frame is None
+
+
+def test_fresh_run_set_cannot_require_reference():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        MODULE.resolve_reference_run(
+            Path("unused.csv"),
+            fresh_run_set=True,
+            require_reference=True,
+        )
