@@ -41,6 +41,9 @@ def validate_oof_file(path: Path, reference: pd.DataFrame | None = None) -> pd.D
     )
     required = {
         "curve_id", "sanger_model_id", "fold", "actual_ln_ic50", "actual_auc",
+        "pred_chembl_mapping_ln_ic50", "pred_chembl_mapping_auc",
+        "pred_target_evidence_ln_ic50", "pred_target_evidence_auc",
+        "pred_gene_evidence_ln_ic50", "pred_gene_evidence_auc",
         "pred_full_graph_ln_ic50", "pred_full_graph_auc",
         "pred_drug_id_only_ln_ic50", "pred_drug_id_only_auc",
         "pred_expression_only_ln_ic50", "pred_expression_only_auc",
