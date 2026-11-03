@@ -200,7 +200,9 @@ def run_variant(
     fold: int,
     fit_rows: pd.DataFrame,
     val_rows: pd.DataFrame,
+    outer_train_rows: pd.DataFrame,
     test_rows: pd.DataFrame,
+    raw_expression: np.ndarray,
     scaled_expression: np.ndarray,
     model_ids: np.ndarray,
     drug_graph,
@@ -209,7 +211,9 @@ def run_variant(
     args,
     device: torch.device,
 ) -> tuple[pd.DataFrame, dict, dict]:
-    set_seed(args.seed + fold * 101)
+    """Select epoch on inner split, then refit from scratch on all outer-train rows."""
+    selection_seed = args.seed + fold * 101
+    set_seed(selection_seed)
     num_drugs = len(drug_graph.drug_ids)
     model = build_model(
         variant, drug_graph, num_drugs, scaled_expression.shape[1], args
@@ -218,7 +222,6 @@ def run_variant(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
 
-    expression_tensor = torch.from_numpy(scaled_expression).to(device)
     model_row_lookup = {
         str(model_id): index for index, model_id in enumerate(model_ids.astype(str))
     }
@@ -241,7 +244,6 @@ def run_variant(
 
     fit_drugs, fit_cells = pair_indices_for(fit_rows)
     val_drugs, val_cells = pair_indices_for(val_rows)
-    test_drugs, test_cells = pair_indices_for(test_rows)
     fit_targets_raw = torch.tensor(
         fit_rows[list(ENDPOINTS)].to_numpy(dtype=np.float32),
         dtype=torch.float32,
@@ -253,26 +255,28 @@ def run_variant(
         device=device,
     )
 
-    target_mean, target_scale = fit_target_scaler(
+    selection_target_mean, selection_target_scale = fit_target_scaler(
         fit_targets_raw.detach().cpu().numpy()
     )
-    mean_tensor = torch.from_numpy(target_mean).to(device)
-    scale_tensor = torch.from_numpy(target_scale).to(device)
-    fit_targets = (fit_targets_raw - mean_tensor) / scale_tensor
-    val_targets = (val_targets_raw - mean_tensor) / scale_tensor
+    selection_mean_tensor = torch.from_numpy(selection_target_mean).to(device)
+    selection_scale_tensor = torch.from_numpy(selection_target_scale).to(device)
+    fit_targets = (fit_targets_raw - selection_mean_tensor) / selection_scale_tensor
+    val_targets = (val_targets_raw - selection_mean_tensor) / selection_scale_tensor
+    selection_expression_tensor = torch.from_numpy(scaled_expression).to(device)
 
-    def predict(drug_indices, cell_indices):
+    def predict_selection(drug_indices, cell_indices):
         model.eval()
         if variant == "full_graph":
             drug_embeddings, cell_embeddings = model.encode(
-                expression_tensor, edge_index, edge_type, node_type
+                selection_expression_tensor, edge_index, edge_type, node_type
             )
             return model.score_pairs(
                 drug_embeddings, cell_embeddings, drug_indices, cell_indices
             )
-        return model(expression_tensor, drug_indices, cell_indices)
+        return model(
+            selection_expression_tensor, drug_indices, cell_indices
+        )
 
-    best_state = None
     best_val = float("inf")
     best_epoch = 0
     patience_left = args.patience
@@ -280,54 +284,168 @@ def run_variant(
         model.train()
         optimizer.zero_grad(set_to_none=True)
         if variant == "full_graph":
-            # Keep graph encoder in training mode for dropout.
             drug_embeddings, cell_embeddings = model.encode(
-                expression_tensor, edge_index, edge_type, node_type
+                selection_expression_tensor, edge_index, edge_type, node_type
             )
             fit_predictions = model.score_pairs(
                 drug_embeddings, cell_embeddings, fit_drugs, fit_cells
             )
         else:
-            fit_predictions = model(expression_tensor, fit_drugs, fit_cells)
-        loss = torch.nn.functional.smooth_l1_loss(fit_predictions, fit_targets)
-        if not torch.isfinite(loss):
-            raise RuntimeError(
-                f"Non-finite {variant} training loss in fold {fold}, epoch {epoch}."
+            fit_predictions = model(
+                selection_expression_tensor, fit_drugs, fit_cells
             )
-        loss.backward()
+        selection_loss = torch.nn.functional.smooth_l1_loss(
+            fit_predictions, fit_targets
+        )
+        if not torch.isfinite(selection_loss):
+            raise RuntimeError(
+                f"Non-finite {variant} epoch-selection loss in fold {fold}, epoch {epoch}."
+            )
+        selection_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
 
-        model.eval()
         with torch.no_grad():
-            validation_predictions = predict(val_drugs, val_cells)
+            validation_predictions = predict_selection(val_drugs, val_cells)
             validation_loss = torch.nn.functional.smooth_l1_loss(
                 validation_predictions, val_targets
             ).item()
         if validation_loss < best_val - args.min_delta:
             best_val = validation_loss
             best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
             patience_left = args.patience
         else:
             patience_left -= 1
         if epoch == 1 or epoch % 10 == 0:
             print(
-                f"fold={fold} variant={variant} epoch={epoch} "
-                f"train_scaled_smooth_l1={loss.item():.5f} "
+                f"fold={fold} variant={variant} selection_epoch={epoch} "
+                f"fit_scaled_smooth_l1={selection_loss.item():.5f} "
                 f"val_scaled_smooth_l1={validation_loss:.5f}",
                 flush=True,
             )
         if patience_left <= 0:
             break
 
-    if best_state is None:
-        raise RuntimeError(f"No best state captured for {variant}, fold {fold}.")
-    model.load_state_dict(best_state)
-    model.eval()
+    if best_epoch < 1:
+        raise RuntimeError(
+            f"No epoch selected for {variant}, fold {fold}; inner validation failed."
+        )
+
+    # Refit the selected architecture from a fresh initialisation on every
+    # response row and cell line in the complete outer-training fold.
+    outer_train_groups = set(outer_train_rows["sanger_model_id"].astype(str))
+    expected_train_groups = (
+        set(fit_rows["sanger_model_id"].astype(str))
+        | set(val_rows["sanger_model_id"].astype(str))
+    )
+    if outer_train_groups != expected_train_groups:
+        raise RuntimeError(
+            "Outer-training groups are not exactly the union of inner fit and validation."
+        )
+    outer_test_groups = set(test_rows["sanger_model_id"].astype(str))
+    if outer_train_groups & outer_test_groups:
+        raise RuntimeError("Outer test cell lines leaked into final refit.")
+
+    refit_expression, refit_feature_meta = select_and_scale_expression(
+        raw_expression,
+        model_ids,
+        outer_train_groups,
+        args.top_k_genes,
+    )
+    refit_target_values = outer_train_rows[list(ENDPOINTS)].to_numpy(
+        dtype=np.float32
+    )
+    refit_target_mean, refit_target_scale = fit_target_scaler(
+        refit_target_values
+    )
+
+    # Use a deterministic but separate initialisation stream for the refit.
+    set_seed(selection_seed + 1_000_003)
+    refit_model = build_model(
+        variant,
+        drug_graph,
+        num_drugs,
+        refit_expression.shape[1],
+        args,
+    ).to(device)
+    refit_optimizer = torch.optim.AdamW(
+        refit_model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+    )
+    refit_expression_tensor = torch.from_numpy(refit_expression).to(device)
+    refit_train_drugs, refit_train_cells = pair_indices_for(outer_train_rows)
+    test_drugs, test_cells = pair_indices_for(test_rows)
+    refit_targets_raw = torch.tensor(
+        refit_target_values,
+        dtype=torch.float32,
+        device=device,
+    )
+    refit_mean_tensor = torch.from_numpy(refit_target_mean).to(device)
+    refit_scale_tensor = torch.from_numpy(refit_target_scale).to(device)
+    refit_targets = (
+        refit_targets_raw - refit_mean_tensor
+    ) / refit_scale_tensor
+
+    def predict_refit(drug_indices, cell_indices):
+        refit_model.eval()
+        if variant == "full_graph":
+            drug_embeddings, cell_embeddings = refit_model.encode(
+                refit_expression_tensor, edge_index, edge_type, node_type
+            )
+            return refit_model.score_pairs(
+                drug_embeddings, cell_embeddings, drug_indices, cell_indices
+            )
+        return refit_model(
+            refit_expression_tensor, drug_indices, cell_indices
+        )
+
+    final_refit_loss = float("nan")
+    for refit_epoch in range(1, best_epoch + 1):
+        refit_model.train()
+        refit_optimizer.zero_grad(set_to_none=True)
+        if variant == "full_graph":
+            drug_embeddings, cell_embeddings = refit_model.encode(
+                refit_expression_tensor, edge_index, edge_type, node_type
+            )
+            refit_predictions = refit_model.score_pairs(
+                drug_embeddings,
+                cell_embeddings,
+                refit_train_drugs,
+                refit_train_cells,
+            )
+        else:
+            refit_predictions = refit_model(
+                refit_expression_tensor,
+                refit_train_drugs,
+                refit_train_cells,
+            )
+        refit_loss = torch.nn.functional.smooth_l1_loss(
+            refit_predictions, refit_targets
+        )
+        if not torch.isfinite(refit_loss):
+            raise RuntimeError(
+                f"Non-finite {variant} full-fold refit loss in fold {fold}, "
+                f"epoch {refit_epoch}."
+            )
+        refit_loss.backward()
+        torch.nn.utils.clip_grad_norm_(refit_model.parameters(), max_norm=2.0)
+        refit_optimizer.step()
+        final_refit_loss = float(refit_loss.item())
+        if refit_epoch == 1 or refit_epoch % 10 == 0 or refit_epoch == best_epoch:
+            print(
+                f"fold={fold} variant={variant} refit_epoch={refit_epoch}/"
+                f"{best_epoch} full_outer_train_scaled_smooth_l1={final_refit_loss:.5f}",
+                flush=True,
+            )
+
+    refit_model.eval()
     with torch.no_grad():
-        scaled_predictions = predict(test_drugs, test_cells).cpu().numpy()
-    predictions = scaled_predictions * target_scale[None, :] + target_mean[None, :]
+        scaled_predictions = predict_refit(test_drugs, test_cells).cpu().numpy()
+    predictions = (
+        scaled_predictions * refit_target_scale[None, :]
+        + refit_target_mean[None, :]
+    )
 
     result = test_rows[
         ["curve_id", "drug_id", "sanger_model_id", "fold", "ln_ic50", "auc"]
@@ -338,18 +456,25 @@ def run_variant(
     metrics = {
         "variant": variant,
         "fold": fold,
-        "fit_cell_lines": int(fit_rows["sanger_model_id"].nunique()),
+        "inner_fit_cell_lines": int(fit_rows["sanger_model_id"].nunique()),
         "inner_validation_cell_lines": int(val_rows["sanger_model_id"].nunique()),
+        "outer_training_cell_lines": int(outer_train_rows["sanger_model_id"].nunique()),
         "outer_test_cell_lines": int(test_rows["sanger_model_id"].nunique()),
-        "fit_response_rows": int(len(fit_rows)),
+        "inner_fit_response_rows": int(len(fit_rows)),
         "inner_validation_rows": int(len(val_rows)),
+        "outer_training_response_rows": int(len(outer_train_rows)),
         "outer_test_rows": int(len(test_rows)),
-        "best_epoch": best_epoch,
-        "best_inner_validation_scaled_smooth_l1": best_val,
+        "selected_epoch_from_inner_validation": int(best_epoch),
+        "best_inner_validation_scaled_smooth_l1": float(best_val),
+        "final_refit_epochs": int(best_epoch),
+        "final_refit_training_loss": final_refit_loss,
+        "final_refit_used_all_outer_training_rows": True,
+        "expression_preprocessing": refit_feature_meta,
         "target_scaler": {
             endpoint: {
-                "training_mean": float(target_mean[index]),
-                "training_std": float(target_scale[index]),
+                "training_mean": float(refit_target_mean[index]),
+                "training_std": float(refit_target_scale[index]),
+                "fit_scope": "complete outer-training response rows",
             }
             for index, endpoint in enumerate(ENDPOINTS)
         },
@@ -361,26 +486,39 @@ def run_variant(
         ),
     }
     checkpoint = {
-        "state_dict": best_state,
+        "state_dict": refit_model.state_dict(),
         "variant": variant,
         "fold": fold,
         "message_passing_layers": (
-            model.num_message_passing_layers if variant == "full_graph" else 0
+            refit_model.num_message_passing_layers if variant == "full_graph" else 0
         ),
-        "target_mean": target_mean,
-        "target_scale": target_scale,
+        "selected_epoch_from_inner_validation": int(best_epoch),
+        "final_refit_epochs": int(best_epoch),
+        "training_scope": "all outer-training Sanger model IDs and response rows",
+        "target_mean": refit_target_mean,
+        "target_scale": refit_target_scale,
         "model_config": {
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
             "top_k_genes": args.top_k_genes,
         },
-        "selected_gene_indices": feature_meta["selected_gene_indices"],
-        "expression_scaler_mean": feature_meta["scaler_mean"],
-        "expression_scaler_scale": feature_meta["scaler_scale"],
-        "expression_scaler_fit_scope": feature_meta["fit_scope"],
+        "selected_gene_indices": refit_feature_meta["selected_gene_indices"],
+        "expression_scaler_mean": refit_feature_meta["scaler_mean"],
+        "expression_scaler_scale": refit_feature_meta["scaler_scale"],
+        "expression_scaler_fit_scope": refit_feature_meta["fit_scope"],
+        "selection_stage": {
+            "inner_fit_cell_lines": int(fit_rows["sanger_model_id"].nunique()),
+            "inner_validation_cell_lines": int(val_rows["sanger_model_id"].nunique()),
+            "best_validation_loss": float(best_val),
+            "selected_epoch": int(best_epoch),
+            "target_mean": selection_target_mean,
+            "target_scale": selection_target_scale,
+            "expression_feature_indices": feature_meta["selected_gene_indices"],
+            "expression_scaler_mean": feature_meta["scaler_mean"],
+            "expression_scaler_scale": feature_meta["scaler_scale"],
+        },
     }
     return result, metrics, checkpoint
-
 
 def compare_external_baselines(
     oof: pd.DataFrame,
