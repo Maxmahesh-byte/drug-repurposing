@@ -226,7 +226,7 @@ def run_variant(
     edge_type = drug_graph.edge_type.to(device)
     node_type = drug_graph.node_type.to(device)
 
-    def tensors_for(frame: pd.DataFrame):
+    def pair_indices_for(frame: pd.DataFrame):
         drugs = torch.tensor(
             [drug_id_to_index[str(value)] for value in frame["drug_id"]],
             dtype=torch.long,
@@ -237,16 +237,21 @@ def run_variant(
             dtype=torch.long,
             device=device,
         )
-        targets = torch.tensor(
-            frame[list(ENDPOINTS)].to_numpy(dtype=np.float32),
-            dtype=torch.float32,
-            device=device,
-        )
-        return drugs, cells, targets
+        return drugs, cells
 
-    fit_drugs, fit_cells, fit_targets_raw = tensors_for(fit_rows)
-    val_drugs, val_cells, val_targets_raw = tensors_for(val_rows)
-    test_drugs, test_cells, _ = tensors_for(test_rows)
+    fit_drugs, fit_cells = pair_indices_for(fit_rows)
+    val_drugs, val_cells = pair_indices_for(val_rows)
+    test_drugs, test_cells = pair_indices_for(test_rows)
+    fit_targets_raw = torch.tensor(
+        fit_rows[list(ENDPOINTS)].to_numpy(dtype=np.float32),
+        dtype=torch.float32,
+        device=device,
+    )
+    val_targets_raw = torch.tensor(
+        val_rows[list(ENDPOINTS)].to_numpy(dtype=np.float32),
+        dtype=torch.float32,
+        device=device,
+    )
 
     target_mean, target_scale = fit_target_scaler(
         fit_targets_raw.detach().cpu().numpy()
@@ -428,7 +433,7 @@ def compare_external_baselines(
             comparisons[comparison_key] = {"status": "no_overlap"}
             continue
         fold_match = np.array_equal(
-            joined["fold_oof"].to_numpy(), joined["fold_baseline"].to_numpy()
+            joined["fold"].to_numpy(), joined["fold_baseline"].to_numpy()
         )
         if not fold_match:
             raise ValueError(f"Fold assignments differ in comparator {name}.")
