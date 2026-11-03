@@ -325,7 +325,7 @@ def main(args) -> dict[str, Any]:
                     {
                         "run": label,
                         "endpoint": endpoint,
-                        "comparison": f"full_graph_minus_{comparator_name}",
+                        "comparison": f"gene_evidence_minus_{comparator_name}",
                         **result,
                     }
                 )
@@ -370,7 +370,7 @@ def main(args) -> dict[str, Any]:
             "unit": "Sanger model ID; all measured drug-response curves for each sampled cell line remain together",
             "stratification": "resample cell-line clusters within each frozen outer fold",
             "paired": True,
-            "interpretation": "For delta MAE = full_graph - comparator, negative values favour full_graph; a 95% interval spanning zero is inconclusive.",
+            "interpretation": "For each named model_a_minus_model_b comparison, negative delta MAE favours model_a; a 95% interval spanning zero is inconclusive.",
         },
         "per_run_metrics": metric_rows,
         "per_run_cluster_bootstrap": bootstrap_rows,
