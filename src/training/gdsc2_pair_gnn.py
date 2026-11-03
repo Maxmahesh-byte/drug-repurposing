@@ -20,7 +20,20 @@ RELATIONS = (
     ("chembl_molecule", "chembl_direct_mechanism", "target"),
     ("target", "has_chembl_gene_symbol", "gene"),
 )
+OPENPEDCAN_RELATIONS = (
+    ("sample", "has_gene_variant", "gene"),
+    ("tumor_type", "copy_number_in_tumor", "gene"),
+    ("sample", "classified_as", "tumor_type"),
+    ("sample", "has_diagnosis", "diagnosis"),
+    ("sample", "from_cohort", "cohort"),
+    ("sample", "has_molecular_subtype", "molecular_subtype"),
+    ("sample", "has_fusion", "fusion"),
+    ("fusion", "fusion_gene", "gene"),
+)
 NODE_TYPES = ("drug", "chembl_molecule", "target", "gene")
+OPENPEDCAN_NODE_TYPES = (
+    "sample", "tumor_type", "diagnosis", "cohort", "molecular_subtype", "fusion"
+)
 
 
 @dataclass
@@ -34,14 +47,17 @@ class CompactDrugGraph:
     num_relations: int
     node_counts: dict[str, int]
     relation_counts: dict[str, int]
+    node_types: tuple[str, ...]
+    relation_names: tuple[tuple[str, str, str], ...]
 
 
 def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
-    """Extract the compact, response-free drug-target evidence subgraph.
+    """Extract drug evidence plus pediatric OpenPedCan context without response edges.
 
-    All drug nodes are retained. ChEMBL molecules, targets, and genes are
-    restricted to nodes used by the three specified evidence relations.
-    Each relation is made bidirectional with a distinct reverse-relation ID.
+    OpenPedCan messages are restricted to genes already linked to the drug-target
+    subgraph. This keeps the graph compact while allowing mutation, fusion,
+    tumour-level copy-number, and sample metadata evidence to shape shared gene
+    representations. The original GDSC2 response relation is never copied.
     """
     available_node_types = set(graph.node_types)
     missing_node_types = set(NODE_TYPES) - available_node_types
@@ -53,9 +69,20 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     if missing_relations:
         raise ValueError(f"Typed graph is missing evidence relations: {missing_relations}")
 
+    node_types = tuple(
+        [*NODE_TYPES, *[name for name in OPENPEDCAN_NODE_TYPES if name in available_node_types]]
+    )
+    all_relations = (*RELATIONS, *OPENPEDCAN_RELATIONS)
+    relation_names = tuple(
+        relation for relation in all_relations
+        if relation in edge_type_lookup
+        and relation[0] in node_types
+        and relation[2] in node_types
+    )
+
     node_ids: dict[str, list[str]] = {
         node_type: [str(value) for value in graph[node_type].node_ids]
-        for node_type in NODE_TYPES
+        for node_type in node_types
     }
     for node_type, values in node_ids.items():
         if len(values) != len(set(values)):
@@ -64,7 +91,7 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         raise ValueError("Typed graph contains no drug nodes.")
 
     raw_edges: dict[tuple[str, str, str], torch.Tensor] = {}
-    for relation in RELATIONS:
+    for relation in relation_names:
         edge_index = graph[edge_type_lookup[relation]].edge_index.detach().cpu().long()
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError(f"Invalid edge_index shape for relation {relation}.")
@@ -78,22 +105,73 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
                 raise ValueError(f"Target node index out of range in relation {relation}.")
         raw_edges[relation] = edge_index
 
-    # Build only the connected entity subset needed for drug mechanism paths.
-    selected: dict[str, set[int]] = {
-        "drug": set(range(len(node_ids["drug"]))),
-        "chembl_molecule": set(),
-        "target": set(),
-        "gene": set(),
-    }
-    drug_to_molecule = raw_edges[RELATIONS[0]]
-    molecule_to_target = raw_edges[RELATIONS[1]]
-    target_to_gene = raw_edges[RELATIONS[2]]
+    # Seed the compact graph from the GDSC2 -> ChEMBL -> target -> gene path.
+    selected: dict[str, set[int]] = {node_type: set() for node_type in node_types}
+    selected["drug"] = set(range(len(node_ids["drug"])))
+    for relation_index, relation in enumerate(RELATIONS):
+        edge = raw_edges[relation]
+        if relation_index == 0:
+            selected["chembl_molecule"].update(edge[1].tolist())
+        elif relation_index == 1:
+            selected["chembl_molecule"].update(edge[0].tolist())
+            selected["target"].update(edge[1].tolist())
+        elif relation_index == 2:
+            selected["target"].update(edge[0].tolist())
+            selected["gene"].update(edge[1].tolist())
 
-    selected["chembl_molecule"].update(drug_to_molecule[1].tolist())
-    selected["chembl_molecule"].update(molecule_to_target[0].tolist())
-    selected["target"].update(molecule_to_target[1].tolist())
-    selected["target"].update(target_to_gene[0].tolist())
-    selected["gene"].update(target_to_gene[1].tolist())
+    # Pull only OpenPedCan observations touching genes in the drug-target graph.
+    gene_targets = set(selected["gene"])
+    mutation_relation = ("sample", "has_gene_variant", "gene")
+    cnv_relation = ("tumor_type", "copy_number_in_tumor", "gene")
+    fusion_gene_relation = ("fusion", "fusion_gene", "gene")
+    sample_fusion_relation = ("sample", "has_fusion", "fusion")
+
+    if mutation_relation in raw_edges:
+        edge = raw_edges[mutation_relation]
+        selected["sample"].update(
+            int(sample) for sample, gene in edge.t().tolist()
+            if int(gene) in gene_targets
+        )
+    if cnv_relation in raw_edges:
+        edge = raw_edges[cnv_relation]
+        selected["tumor_type"].update(
+            int(tumor) for tumor, gene in edge.t().tolist()
+            if int(gene) in gene_targets
+        )
+    if fusion_gene_relation in raw_edges:
+        edge = raw_edges[fusion_gene_relation]
+        selected["fusion"].update(
+            int(fusion) for fusion, gene in edge.t().tolist()
+            if int(gene) in gene_targets
+        )
+
+    # Close the selected sample/fusion neighbourhood in both directions.
+    if sample_fusion_relation in raw_edges:
+        for _ in range(2):
+            for sample, fusion in raw_edges[sample_fusion_relation].t().tolist():
+                if int(fusion) in selected["fusion"]:
+                    selected["sample"].add(int(sample))
+                if int(sample) in selected["sample"]:
+                    selected["fusion"].add(int(fusion))
+
+    # Retain histology and sample annotations for selected patient samples.
+    sample_tumor_relation = ("sample", "classified_as", "tumor_type")
+    if sample_tumor_relation in raw_edges:
+        for sample, tumor in raw_edges[sample_tumor_relation].t().tolist():
+            if int(sample) in selected["sample"] or int(tumor) in selected["tumor_type"]:
+                selected["sample"].add(int(sample))
+                selected["tumor_type"].add(int(tumor))
+
+    for relation in (
+        ("sample", "has_diagnosis", "diagnosis"),
+        ("sample", "from_cohort", "cohort"),
+        ("sample", "has_molecular_subtype", "molecular_subtype"),
+    ):
+        if relation not in raw_edges:
+            continue
+        for sample, metadata_node in raw_edges[relation].t().tolist():
+            if int(sample) in selected["sample"]:
+                selected[relation[2]].add(int(metadata_node))
 
     selected_ids: dict[str, list[int]] = {
         node_type: sorted(indices) for node_type, indices in selected.items()
@@ -106,7 +184,7 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     node_counts: dict[str, int] = {}
     running = 0
     node_type_values: list[int] = []
-    for type_index, node_type in enumerate(NODE_TYPES):
+    for type_index, node_type in enumerate(node_types):
         offsets[node_type] = running
         count = len(selected_ids[node_type])
         node_counts[node_type] = count
@@ -116,7 +194,7 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     all_edges: list[torch.Tensor] = []
     all_edge_types: list[torch.Tensor] = []
     relation_counts: dict[str, int] = {}
-    for relation_index, relation in enumerate(RELATIONS):
+    for relation_index, relation in enumerate(relation_names):
         source_type, _, target_type = relation
         raw = raw_edges[relation]
         kept = [
@@ -139,12 +217,10 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         forward = torch.stack((source_local, target_local), dim=0)
         reverse = torch.stack((target_local, source_local), dim=0)
         all_edges.extend((forward, reverse))
-        all_edge_types.extend(
-            (
-                torch.full((len(kept),), relation_index, dtype=torch.long),
-                torch.full((len(kept),), relation_index + len(RELATIONS), dtype=torch.long),
-            )
-        )
+        all_edge_types.extend((
+            torch.full((len(kept),), relation_index, dtype=torch.long),
+            torch.full((len(kept),), relation_index + len(relation_names), dtype=torch.long),
+        ))
 
     if all_edges:
         edge_index_out = torch.cat(all_edges, dim=1).contiguous()
@@ -156,7 +232,7 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     drug_ids = [node_ids["drug"][index] for index in selected_ids["drug"]]
     drug_indices = torch.arange(node_counts["drug"], dtype=torch.long)
     if edge_index_out.numel() and int(edge_index_out.max()) >= running:
-        raise ValueError("Compact drug graph contains an out-of-range node index.")
+        raise ValueError("Compact graph contains an out-of-range node index.")
 
     return CompactDrugGraph(
         edge_index=edge_index_out,
@@ -165,17 +241,19 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
         drug_indices=drug_indices,
         drug_ids=drug_ids,
         num_nodes=running,
-        num_relations=2 * len(RELATIONS),
+        num_relations=2 * len(relation_names),
         node_counts=node_counts,
         relation_counts=relation_counts,
+        node_types=node_types,
+        relation_names=relation_names,
     )
 
 
-
-EVIDENCE_LEVEL_RELATION_LIMITS = {
-    "chembl_mapping": 1,
-    "target_evidence": 2,
-    "gene_evidence": 3,
+EVIDENCE_LEVEL_RELATIONS = {
+    "chembl_mapping": set(RELATIONS[:1]),
+    "target_evidence": set(RELATIONS[:2]),
+    "gene_evidence": set(RELATIONS),
+    "pediatric_context": set((*RELATIONS, *OPENPEDCAN_RELATIONS)),
 }
 
 
@@ -183,31 +261,24 @@ def restrict_compact_drug_graph(
     graph: CompactDrugGraph,
     evidence_level: str,
 ) -> CompactDrugGraph:
-    """Return a relation-masked view while preserving node IDs and model dimensions.
-
-    The three nested evidence levels are:
-      chembl_mapping: drug <-> ChEMBL molecule mapping only;
-      target_evidence: mapping plus molecule <-> direct target;
-      gene_evidence: mapping, direct target, and target <-> gene annotation.
-
-    This graph contains entity-ID embeddings and typed relationships, not atom/bond
-    chemical structures or learned molecular fingerprints. All node rows and all
-    six relation parameter slots are retained across levels so graph ablations
-    share the same encoder dimensions; only enabled message-passing edges differ.
-    """
-    if evidence_level not in EVIDENCE_LEVEL_RELATION_LIMITS:
+    """Mask relation families while keeping identical node and encoder dimensions."""
+    if evidence_level not in EVIDENCE_LEVEL_RELATIONS:
         raise ValueError(
             f"Unknown evidence level {evidence_level!r}; expected one of "
-            f"{sorted(EVIDENCE_LEVEL_RELATION_LIMITS)}."
+            f"{sorted(EVIDENCE_LEVEL_RELATIONS)}."
         )
-    relation_limit = EVIDENCE_LEVEL_RELATION_LIMITS[evidence_level]
-    forward_relation_count = len(RELATIONS)
+    allowed_names = EVIDENCE_LEVEL_RELATIONS[evidence_level]
+    forward_relation_count = len(graph.relation_names)
     if graph.num_relations != 2 * forward_relation_count:
-        raise ValueError(
-            "Compact graph relation count does not match the configured evidence schema."
-        )
-    allowed_relation_ids = set(range(relation_limit)) | {
-        forward_relation_count + index for index in range(relation_limit)
+        raise ValueError("Compact graph relation count does not match its relation schema.")
+
+    allowed_relation_ids = {
+        index
+        for index, relation in enumerate(graph.relation_names)
+        if relation in allowed_names
+    }
+    allowed_relation_ids |= {
+        forward_relation_count + index for index in allowed_relation_ids
     }
     keep_mask = torch.zeros_like(graph.edge_type, dtype=torch.bool)
     for relation_id in allowed_relation_ids:
@@ -216,9 +287,9 @@ def restrict_compact_drug_graph(
     relation_counts = {
         "::".join(relation): (
             int(graph.relation_counts.get("::".join(relation), 0))
-            if relation_index < relation_limit else 0
+            if relation in allowed_names else 0
         )
-        for relation_index, relation in enumerate(RELATIONS)
+        for relation in graph.relation_names
     }
     return CompactDrugGraph(
         edge_index=graph.edge_index[:, keep_mask].contiguous(),
@@ -230,7 +301,10 @@ def restrict_compact_drug_graph(
         num_relations=graph.num_relations,
         node_counts=dict(graph.node_counts),
         relation_counts=relation_counts,
+        node_types=graph.node_types,
+        relation_names=graph.relation_names,
     )
+
 
 def summarize_drug_evidence_coverage(graph: CompactDrugGraph) -> dict[str, Any]:
     """Count drug nodes with complete evidence paths in the response-free graph."""
@@ -290,10 +364,11 @@ def summarize_drug_evidence_coverage(graph: CompactDrugGraph) -> dict[str, Any]:
 
 
 class DrugCellLinePairGNN(nn.Module):
-    """Three-layer RGCN drug encoder + expression MLP + pairwise dual-endpoint head.
+    """Five-layer RGCN + cell-expression encoder + pairwise dual-endpoint head.
 
-    Three message-passing layers are required for a gene to traverse the full
-    reverse evidence path gene -> target -> ChEMBL molecule -> drug.
+    Five layers permit OpenPedCan tumour context to reach drug embeddings along
+    sample -> tumour/fusion -> gene -> target -> molecule -> drug paths. Optional
+    Morgan/descriptor features add chemical structure information to drug nodes.
     """
 
     def __init__(
@@ -305,6 +380,7 @@ class DrugCellLinePairGNN(nn.Module):
         num_expression_features: int,
         hidden_dim: int = 64,
         dropout: float = 0.20,
+        num_chemical_features: int = 0,
     ) -> None:
         super().__init__()
         if min(
@@ -312,25 +388,34 @@ class DrugCellLinePairGNN(nn.Module):
             num_expression_features, hidden_dim,
         ) <= 0:
             raise ValueError("All model dimensions must be positive.")
+        if num_chemical_features < 0:
+            raise ValueError("num_chemical_features cannot be negative.")
         self.entity_embedding = nn.Embedding(num_graph_nodes, hidden_dim)
         self.node_type_embedding = nn.Embedding(num_node_types, hidden_dim)
         nn.init.xavier_uniform_(self.entity_embedding.weight)
         nn.init.xavier_uniform_(self.node_type_embedding.weight)
 
         num_bases = min(4, num_relations)
-        self.drug_conv1 = RGCNConv(
-            hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_bases
+        self.drug_convs = nn.ModuleList([
+            RGCNConv(
+                hidden_dim, hidden_dim, num_relations=num_relations,
+                num_bases=num_bases,
+            )
+            for _ in range(5)
+        ])
+        self.drug_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(5)])
+        self.num_message_passing_layers = 5
+
+        self.chemical_encoder = (
+            nn.Sequential(
+                nn.Linear(num_chemical_features, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            if num_chemical_features > 0 else None
         )
-        self.drug_conv2 = RGCNConv(
-            hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_bases
-        )
-        self.drug_norm1 = nn.LayerNorm(hidden_dim)
-        self.drug_norm2 = nn.LayerNorm(hidden_dim)
-        self.drug_conv3 = RGCNConv(
-            hidden_dim, hidden_dim, num_relations=num_relations, num_bases=num_bases
-        )
-        self.drug_norm3 = nn.LayerNorm(hidden_dim)
-        self.num_message_passing_layers = 3
 
         self.cell_encoder = nn.Sequential(
             nn.Linear(num_expression_features, hidden_dim * 2),
@@ -351,6 +436,7 @@ class DrugCellLinePairGNN(nn.Module):
         )
         self.dropout = dropout
         self.num_drugs = num_drugs
+        self.num_chemical_features = num_chemical_features
 
     def encode(
         self,
@@ -358,19 +444,35 @@ class DrugCellLinePairGNN(nn.Module):
         edge_index: torch.Tensor,
         edge_type: torch.Tensor,
         node_type: torch.Tensor,
+        chemical_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         node_index = torch.arange(
             self.entity_embedding.num_embeddings,
             device=self.entity_embedding.weight.device,
         )
         graph_x = self.entity_embedding(node_index) + self.node_type_embedding(node_type)
-        hidden = self.drug_conv1(graph_x, edge_index, edge_type)
-        hidden = self.drug_norm1(F.relu(hidden + graph_x))
-        hidden = F.dropout(hidden, p=self.dropout, training=self.training)
-        hidden2 = self.drug_conv2(hidden, edge_index, edge_type)
-        hidden = self.drug_norm2(F.relu(hidden2 + hidden))
-        hidden3 = self.drug_conv3(hidden, edge_index, edge_type)
-        hidden = self.drug_norm3(F.relu(hidden3 + hidden))
+        if self.chemical_encoder is not None:
+            if chemical_features is None:
+                raise ValueError("Chemical features are required by this model configuration.")
+            if chemical_features.shape != (self.num_drugs, self.num_chemical_features):
+                raise ValueError(
+                    "Chemical feature matrix must align with compact drug order and configured width."
+                )
+            graph_x = graph_x.clone()
+            graph_x[: self.num_drugs] = (
+                graph_x[: self.num_drugs] + self.chemical_encoder(chemical_features)
+            )
+        elif chemical_features is not None:
+            raise ValueError("Chemical features supplied to a model without a chemical encoder.")
+
+        hidden = graph_x
+        for layer, (convolution, normalization) in enumerate(
+            zip(self.drug_convs, self.drug_norms)
+        ):
+            update = convolution(hidden, edge_index, edge_type)
+            hidden = normalization(F.relu(update + hidden))
+            if layer < len(self.drug_convs) - 1:
+                hidden = F.dropout(hidden, p=self.dropout, training=self.training)
         return hidden[: self.num_drugs], self.cell_encoder(expression_features)
 
     def score_pairs(
