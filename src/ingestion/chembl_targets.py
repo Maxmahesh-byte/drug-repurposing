@@ -30,6 +30,17 @@ OUTPUT_COLUMNS = [
     "source_url",
 ]
 
+MAPPING_OUTPUT_COLUMNS = [
+    "gdsc_drug_id",
+    "gdsc_drug_name",
+    "molecule_chembl_id",
+    "drug_match_method",
+    "matched_chembl_synonym",
+    "chembl_synonym_type",
+    "mapping_source_url",
+    "provenance_state",
+]
+
 
 def _session() -> requests.Session:
     session = requests.Session()
@@ -110,6 +121,35 @@ def extract_gene_symbols(target: dict) -> list[tuple[str, str]]:
     return sorted(set(genes))
 
 
+def build_molecule_mapping_table(
+    drug_pairs_by_molecule: dict[str, list[tuple[str, str, str, str, str]]],
+) -> pd.DataFrame:
+    """Return every uniquely resolved GDSC2-drug to ChEMBL-molecule mapping.
+
+    This table is intentionally independent of whether ChEMBL has a direct
+    human-target mechanism for the molecule.
+    """
+    rows = []
+    for molecule_id, drug_pairs in sorted(drug_pairs_by_molecule.items()):
+        for drug_id, drug_name, match_method, matched_synonym, synonym_type in drug_pairs:
+            rows.append(
+                {
+                    "gdsc_drug_id": str(drug_id),
+                    "gdsc_drug_name": str(drug_name),
+                    "molecule_chembl_id": str(molecule_id),
+                    "drug_match_method": str(match_method),
+                    "matched_chembl_synonym": str(matched_synonym),
+                    "chembl_synonym_type": str(synonym_type),
+                    "mapping_source_url": f"{CHEMBL_API}/molecule/{molecule_id}.json",
+                    "provenance_state": "exact_string_match_not_chemical_equivalence",
+                }
+            )
+    result = pd.DataFrame(rows, columns=MAPPING_OUTPUT_COLUMNS)
+    if not result.empty and result["gdsc_drug_id"].duplicated().any():
+        raise ValueError("A GDSC2 drug resolved to more than one ChEMBL molecule.")
+    return result.drop_duplicates().reset_index(drop=True)
+
+
 def build_chembl_target_dataset(
     gdsc_path: str | Path | None = None,
     output_dir: str | Path | None = None,
@@ -188,6 +228,9 @@ def build_chembl_target_dataset(
                     synonym_match_pairs.add((drug_id, drug_name))
 
     molecule_ids = sorted(drug_pairs_by_molecule)
+    mapping_result = build_molecule_mapping_table(drug_pairs_by_molecule)
+    if mapping_result.empty:
+        raise ValueError("No unambiguous exact-name GDSC2-to-ChEMBL molecule mappings were resolved.")
     mechanisms = []
     for batch_number, molecule_batch in enumerate(list(_chunks(molecule_ids)), start=1):
         mechanisms.extend(
@@ -259,6 +302,15 @@ def build_chembl_target_dataset(
     mechanism_pairs = set(zip(result["gdsc_drug_id"], result["gdsc_drug_name"]))
     mapped_pairs = preferred_match_pairs | synonym_match_pairs
     exact_matches_without_mechanisms = sorted(mapped_pairs - mechanism_pairs)
+    mapping_output_path = dataset_dir / "gdsc2_drug_molecule_mappings.csv"
+    mapping_temporary_path = mapping_output_path.with_suffix(".csv.tmp")
+    try:
+        mapping_result.to_csv(mapping_temporary_path, index=False)
+        mapping_temporary_path.replace(mapping_output_path)
+    finally:
+        if mapping_temporary_path.exists():
+            mapping_temporary_path.unlink()
+
     output_path = dataset_dir / "gdsc2_chembl_target_evidence.csv"
     temporary_path = output_path.with_suffix(".csv.tmp")
     try:
@@ -285,6 +337,9 @@ def build_chembl_target_dataset(
             for drug_id, drug_name in exact_matches_without_mechanisms
         ],
         "nonhuman_target_ids_excluded": sorted(nonhuman_targets),
+        "molecule_mapping_rows": int(len(mapping_result)),
+        "unique_mapped_gdsc_drugs": int(mapping_result["gdsc_drug_id"].nunique()),
+        "molecule_mapping_output_path": str(mapping_output_path),
         "mechanism_gene_rows": int(len(result)),
         "unique_chembl_molecules": int(result["molecule_chembl_id"].nunique()),
         "unique_human_targets": int(result["target_chembl_id"].nunique()),
