@@ -161,11 +161,9 @@ def build_features(
     mapping_id_set = set(mapping_by_id.index)
     missing_mappings = sorted(graph_id_set - mapping_id_set)
     extra_mappings = sorted(mapping_id_set - graph_id_set)
-    if missing_mappings:
-        raise ValueError(
-            "Some graph drug IDs have no audited ChEMBL mapping. "
-            f"First IDs: {missing_mappings[:10]}. Do not infer chemical identity."
-        )
+    # Unmapped graph drugs remain in graph order with an all-zero vector and
+    # structure_available=0. This preserves the full GDSC drug universe without
+    # inventing chemical identity for unresolved compounds.
 
     RDLogger.DisableLog("rdApp.*")
     generator = GetMorganGenerator(radius=MORGAN_RADIUS, fpSize=MORGAN_BITS)
@@ -175,6 +173,24 @@ def build_features(
     audit_rows: list[dict[str, Any]] = []
 
     for position, gdsc_id in enumerate(graph_drug_ids, start=1):
+        if gdsc_id not in mapping_by_id.index:
+            feature_rows.append(np.zeros(len(FEATURE_NAMES), dtype=np.float32))
+            audit_rows.append(
+                {
+                    "graph_drug_index": position - 1,
+                    "gdsc_drug_id": gdsc_id,
+                    "gdsc_drug_name": "",
+                    "molecule_chembl_id": "",
+                    "drug_match_method": "unresolved",
+                    "mapping_provenance": "no_audited_chembl_mapping",
+                    "canonical_smiles": "",
+                    "standard_inchi": "",
+                    "standard_inchi_key": "",
+                    "structure_available": False,
+                    "structure_source_url": "",
+                }
+            )
+            continue
         row = mapping_by_id.loc[gdsc_id]
         chembl_id = str(row["molecule_chembl_id"])
         if chembl_id not in molecule_cache:
@@ -234,7 +250,8 @@ def build_features(
         "descriptor_names": list(DESCRIPTOR_NAMES),
         "feature_width": len(FEATURE_NAMES),
         "graph_drug_count": len(graph_drug_ids),
-        "mapped_graph_drug_count": len(graph_drug_ids),
+        "mapped_graph_drug_count": len(graph_drug_ids) - len(missing_mappings),
+        "unmapped_graph_drug_count": len(missing_mappings),
         "mapping_rows_not_in_graph": extra_mappings,
         "structure_available_count": int(
             pd.DataFrame(audit_rows)["structure_available"].sum()
