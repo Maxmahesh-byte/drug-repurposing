@@ -401,11 +401,15 @@ def main(args) -> dict:
 
     summary = {
         "status": "trained_and_evaluated",
-        "model": "drug-side RGCN evidence encoder + fold-specific cell-line expression MLP + pairwise dual-endpoint head",
+        "model": "drug-side five-layer RGCN evidence encoder with OpenPedCan molecular-context message passing + fold-specific CCLE expression MLP + pairwise dual-endpoint head",
         "scope": "GDSC2 in-vitro single-agent response; held-out cell lines; known drugs",
         "outer_split": "existing five-fold GroupKFold by Sanger model ID; fold IDs 1-5",
         "inner_validation": "GroupShuffleSplit by Sanger model ID from outer training data only",
         "response_relation_used_for_message_passing": False,
+        "openpedcan_patient_context_used_for_message_passing": True,
+        "patient_to_gdsc_sample_identity_join_performed": False,
+        "openpedcan_gene_symbol_normalization": "legacy typed-graph symbols; exact source labels only; HGNC normalization still required",
+        "message_passing_relations": ["drug/ChEMBL/target/gene evidence", "OpenPedCan sample-gene variants", "tumour-gene copy-number summaries", "sample histology/diagnosis/cohort/subtype", "sample-fusion and fusion-partner-gene evidence"],
         "response_edge_attributes_used_as_features": False,
         "fold_specific_expression_selection_and_scaling": True,
         "expression_feature_selection": f"top {args.top_k_genes} training-fold variance genes",
@@ -436,7 +440,10 @@ def main(args) -> dict:
             "This is an exploratory in-vitro cell-line benchmark, not a clinical response predictor.",
             "All drugs are known drugs in the dataset; this does not test unseen-drug generalization.",
             "Drug node embeddings are transductive learned parameters; the graph relations provide target-evidence context.",
-            "No OpenPedCan patient outcome or patient-level label is used.",
+            "OpenPedCan patient molecular context is used as unsupervised graph context only; no patient outcome or patient-level response label is used.",
+            "OpenPedCan patient biospecimens are not equated with GDSC cell lines; shared gene symbols are the biological bridge.",
+            "Exact gene-symbol joins remain provisional until normalized against HGNC/Ensembl identifiers.",
+            "OpenPedCan copy-number evidence in the legacy graph is tumour-type aggregated rather than sample-specific."
         ],
     }
     metrics_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
