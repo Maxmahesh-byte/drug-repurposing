@@ -7,6 +7,7 @@ from scripts.ai.run_gdsc2_pair_gnn_ablations import (
     compare_external_baselines,
     fit_target_scaler,
     prepare_full_outer_refit,
+    run_variant,
     split_outer_fold_rows,
     validate_full_outer_refit_partition,
     validate_pair_expression_alignment,
@@ -16,6 +17,9 @@ from src.training.gdsc2_pair_ablations import (
     DrugIdExpressionModel,
     ExpressionOnlyModel,
 )
+from src.training.gdsc2_pair_gnn import build_compact_drug_graph
+from torch_geometric.data import HeteroData
+from types import SimpleNamespace
 
 
 def test_target_scaler_is_endpoint_specific_and_invertible():
@@ -285,3 +289,99 @@ def test_full_outer_refit_preprocessing_uses_all_train_rows_not_test_rows():
         first_expression[train_expression_rows],
         second_expression[train_expression_rows],
     )
+
+
+
+def _tiny_response_free_graph():
+    graph = HeteroData()
+    graph["drug"].node_ids = ["GDSC_DRUG:1", "GDSC_DRUG:2"]
+    graph["drug"].num_nodes = 2
+    graph["chembl_molecule"].node_ids = ["CHEMBL:1", "CHEMBL:2"]
+    graph["chembl_molecule"].num_nodes = 2
+    graph["target"].node_ids = ["TARGET:1", "TARGET:2"]
+    graph["target"].num_nodes = 2
+    graph["gene"].node_ids = ["GENE:1", "GENE:2"]
+    graph["gene"].num_nodes = 2
+    graph["cell_line"].node_ids = [f"GDSC_MODEL:SIDM_{i}" for i in range(1, 6)]
+    graph["cell_line"].num_nodes = 5
+    graph["drug", "exact_name_chembl_mapping", "chembl_molecule"].edge_index = torch.tensor(
+        [[0, 1], [0, 1]], dtype=torch.long
+    )
+    graph["chembl_molecule", "chembl_direct_mechanism", "target"].edge_index = torch.tensor(
+        [[0, 1], [0, 1]], dtype=torch.long
+    )
+    graph["target", "has_chembl_gene_symbol", "gene"].edge_index = torch.tensor(
+        [[0, 1], [0, 1]], dtype=torch.long
+    )
+    # A response edge is intentionally present but the compact builder drops it.
+    graph["drug", "gdsc2_response", "cell_line"].edge_index = torch.tensor(
+        [[0, 1], [0, 1]], dtype=torch.long
+    )
+    graph["drug", "gdsc2_response", "cell_line"].ln_ic50 = torch.tensor(
+        [99.0, 99.0], dtype=torch.float32
+    )
+    return build_compact_drug_graph(graph)
+
+
+def test_final_refit_checkpoint_is_independent_of_outer_test_labels():
+    rows = []
+    for fold in range(1, 6):
+        sid = f"SIDM_{fold}"
+        for drug_id, offset in (("1", 0.0), ("2", 0.4)):
+            rows.append({
+                "curve_id": f"{sid}_{drug_id}",
+                "drug_id": drug_id,
+                "sanger_model_id": sid,
+                "fold": fold,
+                "ln_ic50": float(fold + offset),
+                "auc": float(0.1 * fold + 0.01 * offset),
+            })
+    pairs = pd.DataFrame(rows)
+    fit_rows, val_rows, test_rows = split_outer_fold_rows(
+        pairs, fold=1, validation_fraction=0.25, seed=13
+    )
+    outer_train_rows = pairs[pairs["fold"] != 1].copy()
+    model_ids = np.asarray([f"SIDM_{i}" for i in range(1, 6)])
+    expression = np.random.default_rng(21).normal(size=(5, 8)).astype(np.float32)
+    fit_groups = set(fit_rows["sanger_model_id"])
+    selection_expression, selection_meta = select_and_scale_expression(
+        expression, model_ids, fit_groups, top_k=4
+    )
+    graph = _tiny_response_free_graph()
+    drug_map = {"1": 0, "2": 1}
+    args = SimpleNamespace(
+        seed=7,
+        hidden_dim=8,
+        dropout=0.0,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        epochs=2,
+        patience=2,
+        min_delta=0.0,
+        top_k_genes=4,
+    )
+
+    first_result, first_metrics, first_checkpoint = run_variant(
+        "full_graph", 1, fit_rows, val_rows, outer_train_rows, test_rows,
+        expression, selection_expression, model_ids, graph, drug_map,
+        selection_meta, args, torch.device("cpu"),
+    )
+    changed_test = test_rows.copy()
+    changed_test["ln_ic50"] = changed_test["ln_ic50"] + 1e6
+    changed_test["auc"] = changed_test["auc"] - 1e6
+    _, second_metrics, second_checkpoint = run_variant(
+        "full_graph", 1, fit_rows, val_rows, outer_train_rows, changed_test,
+        expression, selection_expression, model_ids, graph, drug_map,
+        selection_meta, args, torch.device("cpu"),
+    )
+
+    assert first_metrics["final_refit_used_all_outer_training_rows"] is True
+    assert first_metrics["outer_training_cell_lines"] == 4
+    assert first_metrics["outer_training_response_rows"] == len(outer_train_rows)
+    assert first_metrics["final_refit_epochs"] == first_metrics["selected_epoch_from_inner_validation"]
+    assert second_metrics["selected_epoch_from_inner_validation"] == first_metrics["selected_epoch_from_inner_validation"]
+    assert first_checkpoint["training_scope"] == "all outer-training Sanger model IDs and response rows"
+    assert first_checkpoint["selected_gene_indices"] == second_checkpoint["selected_gene_indices"]
+    assert np.allclose(first_checkpoint["target_mean"], second_checkpoint["target_mean"])
+    for key, value in first_checkpoint["state_dict"].items():
+        assert torch.equal(value, second_checkpoint["state_dict"][key]), key
