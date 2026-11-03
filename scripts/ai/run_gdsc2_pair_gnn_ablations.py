@@ -368,7 +368,8 @@ def run_variant(
         optimizer.zero_grad(set_to_none=True)
         if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = model.encode(
-                selection_expression_tensor, edge_index, edge_type, node_type
+                selection_expression_tensor, edge_index, edge_type, node_type,
+                chemical_features=chemical_feature_tensor,
             )
             fit_predictions = model.score_pairs(
                 drug_embeddings, cell_embeddings, fit_drugs, fit_cells
@@ -479,7 +480,8 @@ def run_variant(
         refit_optimizer.zero_grad(set_to_none=True)
         if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = refit_model.encode(
-                refit_expression_tensor, edge_index, edge_type, node_type
+                refit_expression_tensor, edge_index, edge_type, node_type,
+                chemical_features=chemical_feature_tensor,
             )
             refit_predictions = refit_model.score_pairs(
                 drug_embeddings,
