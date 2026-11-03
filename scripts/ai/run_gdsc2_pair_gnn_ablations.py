@@ -781,7 +781,7 @@ def main(args) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(
-        f"Device={device}; variants={', '.join(VARIANTS)}; "
+        f"Device={device}; variants={', '.join(variants)}; "
         f"response_pairs={len(pairs)}",
         flush=True,
     )
@@ -918,6 +918,7 @@ def main(args) -> dict:
             "target_evidence": "RGCN + expression; mapping and direct molecule-to-target evidence edges",
             "gene_evidence": "RGCN + expression; mapping, direct target, and target-to-gene annotation edges",
             "expression_only": "expression encoder only; no drug identity or graph",
+            **({"chemical_evidence": "gene-evidence RGCN + expression with ChEMBL Morgan fingerprints and molecular descriptors"} if chemical_features is not None else {}),
         },
         "graph_ablation_design": {
             "nested_evidence_levels": [
