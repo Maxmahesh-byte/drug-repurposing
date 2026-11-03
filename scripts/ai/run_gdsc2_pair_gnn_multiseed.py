@@ -28,7 +28,19 @@ DEFAULT_REFERENCE = (
 )
 
 
-def validate_oof_file(path: Path, reference: pd.DataFrame | None = None) -> pd.DataFrame:
+def validate_oof_file(
+    path: Path,
+    reference: pd.DataFrame | None = None,
+    *,
+    require_evidence_layers: bool = False,
+) -> pd.DataFrame:
+    """Validate OOF predictions from either the legacy or nested-evidence schema.
+
+    Legacy OOF files contain a single `pred_full_graph_*` result. It is the
+    complete gene-evidence model, so it is aliased to `pred_gene_evidence_*`.
+    Intermediate evidence-layer predictions cannot be inferred from a legacy
+    file and are required only for newly generated experiment runs.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"OOF prediction file not found: {path}")
     frame = pd.read_csv(
@@ -39,30 +51,71 @@ def validate_oof_file(path: Path, reference: pd.DataFrame | None = None) -> pd.D
             "sanger_model_id": str,
         },
     )
-    required = {
+    required_base = {
         "curve_id", "sanger_model_id", "fold", "actual_ln_ic50", "actual_auc",
-        "pred_chembl_mapping_ln_ic50", "pred_chembl_mapping_auc",
-        "pred_target_evidence_ln_ic50", "pred_target_evidence_auc",
-        "pred_gene_evidence_ln_ic50", "pred_gene_evidence_auc",
-        "pred_full_graph_ln_ic50", "pred_full_graph_auc",
         "pred_drug_id_only_ln_ic50", "pred_drug_id_only_auc",
         "pred_expression_only_ln_ic50", "pred_expression_only_auc",
     }
-    missing = required - set(frame.columns)
+    missing = required_base - set(frame.columns)
     if missing:
         raise ValueError(f"{path} is missing columns: {sorted(missing)}")
+
+    for endpoint in ("ln_ic50", "auc"):
+        gene_column = f"pred_gene_evidence_{endpoint}"
+        legacy_column = f"pred_full_graph_{endpoint}"
+        if gene_column not in frame.columns:
+            if legacy_column in frame.columns:
+                frame[gene_column] = frame[legacy_column]
+            else:
+                raise ValueError(
+                    f"{path} must contain either {gene_column!r} or "
+                    f"the legacy {legacy_column!r} column."
+                )
+        if legacy_column not in frame.columns:
+            # Preserve compatibility for utilities and downstream code that
+            # still refer to the previous full_graph output name.
+            frame[legacy_column] = frame[gene_column]
+
+    intermediate_columns = {
+        f"pred_{variant}_{endpoint}"
+        for variant in ("chembl_mapping", "target_evidence")
+        for endpoint in ("ln_ic50", "auc")
+    }
+    missing_intermediate = intermediate_columns - set(frame.columns)
+    if require_evidence_layers and missing_intermediate:
+        raise ValueError(
+            f"{path} is missing nested evidence-layer prediction columns: "
+            f"{sorted(missing_intermediate)}"
+        )
+
     if frame["curve_id"].duplicated().any():
         raise ValueError(f"{path} has duplicate curve IDs.")
-    if set(pd.to_numeric(frame["fold"], errors="raise").astype(int).unique()) != set(range(1, 6)):
-        raise ValueError(f"{path} does not include frozen folds 1-5.")
-    if frame.groupby("sanger_model_id")["fold"].nunique().gt(1).any():
-        raise ValueError(f"{path} assigns a Sanger model to multiple folds.")
-    numeric_columns = sorted(required - {"curve_id", "sanger_model_id"})
-    numeric = frame[numeric_columns].to_numpy(dtype=float)
+    numeric_columns = [
+        "fold", "actual_ln_ic50", "actual_auc",
+        *[
+            column for column in frame.columns
+            if column.startswith("pred_")
+        ],
+    ]
+    numeric = frame[numeric_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     if not np.isfinite(numeric).all():
         raise ValueError(f"{path} contains non-finite fold IDs, targets, or predictions.")
     frame["fold"] = pd.to_numeric(frame["fold"], errors="raise").astype(int)
+    if set(frame["fold"].unique()) != set(range(1, 6)):
+        raise ValueError(f"{path} does not include frozen folds 1-5.")
+    if frame.groupby("sanger_model_id")["fold"].nunique().gt(1).any():
+        raise ValueError(f"{path} assigns a Sanger model to multiple folds.")
+
     if reference is not None:
+        # Normalise a supplied reference using the same aliasing convention.
+        reference = reference.copy()
+        for endpoint in ("ln_ic50", "auc"):
+            gene_column = f"pred_gene_evidence_{endpoint}"
+            legacy_column = f"pred_full_graph_{endpoint}"
+            if gene_column not in reference.columns and legacy_column in reference.columns:
+                reference[gene_column] = reference[legacy_column]
+            if legacy_column not in reference.columns and gene_column in reference.columns:
+                reference[legacy_column] = reference[gene_column]
         left = reference.sort_values("curve_id").reset_index(drop=True)
         right = frame.sort_values("curve_id").reset_index(drop=True)
         if not left["curve_id"].equals(right["curve_id"]):
@@ -81,7 +134,6 @@ def validate_oof_file(path: Path, reference: pd.DataFrame | None = None) -> pd.D
             ):
                 raise ValueError(f"Observed {column} values differ in {path}.")
     return frame
-
 
 def resolve_reference_run(
     reference: Path,
@@ -162,7 +214,9 @@ def main(args) -> dict:
             # destination are left untouched. No automatic recursive deletion.
             print(f"Overwriting generated files for seed {seed} in {seed_dir}", flush=True)
         run_command(command)
-        validated = validate_oof_file(output_file, reference_frame)
+        validated = validate_oof_file(
+            output_file, reference_frame, require_evidence_layers=True
+        )
         if reference_frame is None:
             reference_frame = validated
         generated_paths.append(output_file)
