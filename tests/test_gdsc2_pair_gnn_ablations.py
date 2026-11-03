@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import pandas as pd
 import torch
 
 from scripts.ai.run_gdsc2_pair_gnn_ablations import (
