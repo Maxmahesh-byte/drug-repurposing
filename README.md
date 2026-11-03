@@ -32,9 +32,37 @@ The response layer uses the official [Wellcome Sanger GDSC2 fitted dose-response
 
 ## ChEMBL Target Evidence
 
-The target importer resolves GDSC2 drug names by exact ChEMBL preferred-name or exact synonym match, then keeps direct mechanisms for human targets and gene symbols from ChEMBL target-component metadata. Unmatched and ambiguous names, plus exact matches without a direct human mechanism, are recorded in the manifest rather than guessed. In the current Sanger release, 167 of 295 drug names map uniquely; 97 have direct human mechanisms, 70 have no direct mechanism evidence, 126 remain unmatched, and 2 are ambiguous.
+The target importer resolves GDSC2 drug names by exact ChEMBL preferred-name or exact synonym match. It now writes two separate outputs: `gdsc2_drug_molecule_mappings.csv` contains every uniquely resolved drug-to-molecule mapping, while `gdsc2_chembl_target_evidence.csv` contains only documented direct human-target mechanisms and target gene-symbol annotations. Unmatched and ambiguous names are recorded in the manifest rather than guessed. The current audit reports 167 of 295 GDSC2 drug names mapped uniquely and 97 with direct human mechanisms; 126 remain unmatched and 2 are ambiguous. Mapped drugs without qualifying target evidence remain represented in the molecule-mapping layer.
+
+The graph builder adds drug-to-ChEMBL-molecule edges from the mapping table independently of target evidence. Molecule-to-target and target-to-gene edges are added only from the target-evidence table. Exact name matching is still a record-linkage result, not proof of chemical equivalence; the mapping edge preserves that provenance state.
 
 The active DVC pipeline ingests four real OpenPedCan evidence layers, GDSC2 cell-line responses, and ChEMBL direct human-target mechanisms. Node features are deterministic entity types; edge features retain measured molecular counts and GDSC2 responses. In the OpenPedCan graph, copy-number calls are summarized by tumour type and gene, with gain/amplification counts, loss/deletion counts, and unclassified statuses represented as separate named edge attributes; the original status-specific counts remain in edge provenance. These are cohort summaries, not sample-level calls. GNN training and repurposing scores remain disabled until a validated drug-response objective and justified transfer from cell-line models to pediatric disease are implemented. No generated labels or fallback scores are used.
+
+### Rebuilding the separated ChEMBL mapping and target layers
+
+After pulling the `experiment/gdsc2-chembl-mapping-coverage` branch, rebuild the ingestion products and graph in order:
+
+```bash
+.venv/bin/python -c 'from src.ingestion.gdsc2 import build_gdsc2_response_dataset; build_gdsc2_response_dataset()'
+.venv/bin/python -c 'from src.ingestion.chembl_targets import build_chembl_target_dataset; build_chembl_target_dataset()'
+.venv/bin/python src/preprocessing/build_graph.py
+.venv/bin/python scripts/migrate_graph_v2.py
+```
+
+The ChEMBL ingestion now writes both mapping and target-evidence CSVs. The graph build requires both files. The typed graph migration then recreates `data/processed/graph_v2/typed_graph_v2.pt` for the pair-GNN.
+
+Keep the previous `data/ai/gdsc2_evidence_layer_ablations` results unchanged. Train the corrected graph into a new directory so the results remain auditable:
+
+```bash
+.venv/bin/python -m pytest tests/test_chembl_targets.py tests/test_gdsc2_pair_gnn.py tests/test_gdsc2_pair_gnn_ablations.py tests/test_gdsc2_pair_gnn_multiseed.py -q
+
+.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_multiseed.py \\
+  --fresh-run-set \\
+  --seeds 42 43 44 45 46 \\
+  --output-root data/ai/gdsc2_evidence_layer_ablations_full_mapping
+```
+
+The full pipeline's OpenPedCan input files must already be present before rebuilding `openpedcan_graph.pt`. These commands recreate graph artifacts locally; they do not change the already-completed old experiment outputs.
 
 ### Exploratory expression-response benchmark
 

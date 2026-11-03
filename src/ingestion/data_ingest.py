@@ -32,7 +32,7 @@ def download_gdsc_data():
 def ingest_chembl_target_evidence():
     """Ingest exact-name ChEMBL mechanisms for official GDSC2 compounds."""
     path = build_chembl_target_dataset()
-    print(f"ChEMBL direct human-target evidence saved at {path}")
+    print(f"ChEMBL molecule mappings and direct human-target evidence saved under {path.parent}")
     return path
 
 

@@ -25,6 +25,7 @@ stages:
       - data/raw/openpedcan/openpedcan_fusions_manifest.json
       - data/raw/gdsc/gdsc2_responses.csv
       - data/raw/gdsc/gdsc2_manifest.json
+      - data/raw/chembl/gdsc2_drug_molecule_mappings.csv
       - data/raw/chembl/gdsc2_chembl_target_evidence.csv
       - data/raw/chembl/gdsc2_chembl_manifest.json
 
@@ -36,6 +37,7 @@ stages:
       - data/raw/openpedcan/openpedcan_copy_number_phase3.csv
       - data/raw/openpedcan/openpedcan_fusions_phase4.csv
       - data/raw/gdsc/gdsc2_responses.csv
+      - data/raw/chembl/gdsc2_drug_molecule_mappings.csv
       - data/raw/chembl/gdsc2_chembl_target_evidence.csv
       - src/preprocessing/build_graph.py
     outs:
