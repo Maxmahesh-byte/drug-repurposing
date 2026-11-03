@@ -611,9 +611,26 @@ def compare_external_baselines(
         if baseline["curve_id"].duplicated().any():
             raise ValueError(f"Duplicate curve IDs in comparator {path}.")
         endpoint = "ln_ic50" if "ln_ic50" in name else "auc"
-        variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
-        if f"pred_full_graph_{endpoint}" in oof.columns:
-            variant_cols.append(f"pred_full_graph_{endpoint}")
+        available_variant_columns = {
+            variant: f"pred_{variant}_{endpoint}"
+            for variant in VARIANTS
+            if f"pred_{variant}_{endpoint}" in oof.columns
+        }
+        legacy_full_graph_column = f"pred_full_graph_{endpoint}"
+        if legacy_full_graph_column in oof.columns:
+            available_variant_columns.setdefault("full_graph", legacy_full_graph_column)
+        variant_cols = list(dict.fromkeys(available_variant_columns.values()))
+        required_oof_columns = {"curve_id", "fold", "sanger_model_id", f"actual_{endpoint}"}
+        missing_oof_columns = required_oof_columns - set(oof.columns)
+        if missing_oof_columns:
+            raise ValueError(
+                f"OOF predictions are missing required identity/target columns: "
+                f"{sorted(missing_oof_columns)}"
+            )
+        if not variant_cols:
+            raise ValueError(
+                f"OOF predictions contain no recognized model prediction columns for {endpoint}."
+            )
         selected_baseline = baseline[
             ["curve_id", "fold", "sanger_model_id", actual_column, prediction_column]
         ].rename(
@@ -654,9 +671,9 @@ def compare_external_baselines(
         prediction_metrics = {
             variant: metric_block(
                 actual_oof,
-                joined[f"pred_{variant}_{endpoint}"].to_numpy(dtype=float),
+                joined[column].to_numpy(dtype=float),
             )
-            for variant in VARIANTS
+            for variant, column in available_variant_columns.items()
         }
         prediction_metrics["external_baseline"] = metric_block(
             actual_oof, joined[prediction_column].to_numpy(dtype=float)
