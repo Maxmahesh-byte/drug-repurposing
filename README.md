@@ -230,3 +230,79 @@ Then train five fresh seeds of the audited three-layer model and its controls in
 ```
 
 Each seed runs all three variants across the same five frozen outer folds. The output includes OOF predictions, fold checkpoints, full-refit metrics, evidence coverage, and the cell-line-cluster uncertainty analysis. This supersedes the earlier inner-fit-only training comparison; keep its outputs separate from the previous two-layer and three-layer inner-fit runs. The new local tests and real-data experiment must pass before interpreting results.
+
+
+## Pediatric-context message-passing GNN (experimental branch)
+
+The branch `feature/pediatric-context-chemistry-gnn` extends the existing typed
+PyG graph used by the GDSC2 pair model. It does **not** create another graph
+framework. The compact model graph now includes the existing
+GDSC2 drug → ChEMBL molecule → direct target → gene evidence path plus
+OpenPedCan context edges for:
+
+- sample → gene somatic-variant evidence;
+- tumour type → gene copy-number summaries;
+- sample → tumour type, diagnosis, cohort, and molecular subtype;
+- sample → fusion → partner-gene evidence.
+
+The compact builder restricts these patient-context relations to genes already
+connected to the drug-target evidence graph. Five R-GCN message-passing layers
+allow context to traverse the longest included paths back to drug nodes. The
+GDSC2 response relation and its response-valued edge attributes remain excluded
+from message passing. OpenPedCan biospecimens are **not** equated with GDSC cell
+lines; the bridge is shared gene identity only.
+
+### Important data-quality boundary
+
+The current legacy typed graph uses source gene symbols and has known legacy
+type/identity collisions. This branch explicitly records that HGNC/Ensembl
+normalization is still required; exact symbol equality is not proof of gene
+identity. The current copy-number relation is tumour-type aggregated, not
+sample-specific. This first milestone therefore tests whether pediatric
+molecular context helps the known-drug / held-out-cell-line in-vitro task; it
+does not establish patient response prediction.
+
+### Run the pediatric-context ablation
+
+After pulling this branch and rebuilding the existing graph from the canonical
+raw exports, run:
+
+```bash
+./.venv/bin/python -m pytest tests/test_gdsc2_pair_gnn.py -q
+./.venv/bin/python scripts/migrate_graph_v2.py
+./.venv/bin/python scripts/ai/prepare_gdsc2_gnn_dataset.py
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_ablations.py \
+  --output-dir data/ai/gdsc2_pair_gnn_pediatric_context
+```
+
+The ablation runner includes `pediatric_context` as a separate variant against
+the existing mapping-only, target, gene-evidence, drug-ID, and expression-only
+controls. Use a new output directory and fresh seeds; do not overwrite prior
+five-seed results.
+
+### Remaining planned evidence layers
+
+This branch is the first integration milestone, not the entire multimodal plan.
+The following work remains before claiming all recommended improvements:
+
+1. Normalize ChEMBL and OpenPedCan gene identifiers through HGNC/Ensembl with
+   explicit one-to-one / ambiguous / unresolved crosswalk states.
+2. Retrieve ChEMBL canonical structures and add RDKit Morgan fingerprints and
+   molecular descriptors with structure-source provenance and a missingness mask.
+3. Audit available GDSC/CCLE cell-line mutation, copy-number, fusion, and
+   pathway-level features; add only features matched by stable Cellosaurus /
+   Sanger / DepMap model identifiers. OpenPedCan patient observations must not
+   be copied onto unrelated cell lines.
+4. Add curated, source-backed pathway and drug-target evidence (e.g. Reactome
+   and other licensed/authoritative sources) with original record identifiers.
+   The existing Phase 4 placeholder importer is deliberately blocked and must
+   not be replaced with synthetic edges.
+5. Add target-/pathway-conditioned drug–cell-line interaction layers and compare
+   R-GCN, attention-based heterogeneous models, and HGT under identical folds,
+   features, and seeds.
+6. Evaluate known-drug and drug-held-out splits separately, plus macro-drug
+   metrics and cell-line-cluster uncertainty.
+
+All additional feature selection, scaling, and learned preprocessing must be
+fit inside each training fold. Patient-level response labels are not available
+from OpenPedCan and must not be inferred from shared genes or histology.
