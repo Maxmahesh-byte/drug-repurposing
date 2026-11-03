@@ -46,7 +46,7 @@ from src.training.gdsc2_pair_gnn import (
 from src.training.gdsc2_pair_ablations import DrugIdExpressionModel, ExpressionOnlyModel
 
 ENDPOINTS = ("ln_ic50", "auc")
-GRAPH_VARIANTS = ("chembl_mapping", "target_evidence", "gene_evidence", "pediatric_context")
+GRAPH_VARIANTS = ("chembl_mapping", "target_evidence", "gene_evidence", "pediatric_context", "chemical_evidence")
 VARIANTS = ("drug_id_only", *GRAPH_VARIANTS, "expression_only")
 LEGACY_VARIANT_ALIASES = {"full_graph": "gene_evidence"}
 
@@ -178,6 +178,7 @@ def build_model(
     num_drugs: int,
     num_expression_features: int,
     args,
+    num_chemical_features: int = 0,
 ) -> torch.nn.Module:
     variant = canonicalize_variant(variant)
     if variant in GRAPH_VARIANTS:
@@ -189,6 +190,7 @@ def build_model(
             num_expression_features=num_expression_features,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
+            num_chemical_features=(num_chemical_features if variant == "chemical_evidence" else 0),
         )
     if variant == "drug_id_only":
         return DrugIdExpressionModel(
@@ -278,6 +280,7 @@ def run_variant(
     model_ids: np.ndarray,
     drug_graph,
     drug_id_to_index: dict[str, int],
+    chemical_features: np.ndarray | None,
     feature_meta: dict,
     args,
     device: torch.device,
@@ -287,8 +290,15 @@ def run_variant(
     selection_seed = args.seed + fold * 101
     set_seed(selection_seed)
     num_drugs = len(drug_graph.drug_ids)
+    chemical_width = int(chemical_features.shape[1]) if variant == "chemical_evidence" and chemical_features is not None else 0
+    if variant == "chemical_evidence" and chemical_features is None:
+        raise ValueError("chemical_evidence requires --chemical-features NPZ input.")
+    if chemical_features is not None and chemical_features.shape[0] != num_drugs:
+        raise ValueError("Chemical feature rows must match compact graph drug order.")
+    chemical_feature_tensor = torch.from_numpy(chemical_features).to(device) if variant == "chemical_evidence" else None
     model = build_model(
-        variant, drug_graph, num_drugs, scaled_expression.shape[1], args
+        variant, drug_graph, num_drugs, scaled_expression.shape[1], args,
+        num_chemical_features=chemical_width,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
@@ -340,7 +350,8 @@ def run_variant(
         model.eval()
         if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = model.encode(
-                selection_expression_tensor, edge_index, edge_type, node_type
+                selection_expression_tensor, edge_index, edge_type, node_type,
+                chemical_features=chemical_feature_tensor,
             )
             return model.score_pairs(
                 drug_embeddings, cell_embeddings, drug_indices, cell_indices
@@ -426,11 +437,8 @@ def run_variant(
     # Use a deterministic but separate initialisation stream for the refit.
     set_seed(selection_seed + 1_000_003)
     refit_model = build_model(
-        variant,
-        drug_graph,
-        num_drugs,
-        refit_expression.shape[1],
-        args,
+        variant, drug_graph, num_drugs, refit_expression.shape[1], args,
+        num_chemical_features=chemical_width,
     ).to(device)
     refit_optimizer = torch.optim.AdamW(
         refit_model.parameters(),
@@ -455,7 +463,8 @@ def run_variant(
         refit_model.eval()
         if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = refit_model.encode(
-                refit_expression_tensor, edge_index, edge_type, node_type
+                refit_expression_tensor, edge_index, edge_type, node_type,
+                chemical_features=chemical_feature_tensor,
             )
             return refit_model.score_pairs(
                 drug_embeddings, cell_embeddings, drug_indices, cell_indices
@@ -554,7 +563,7 @@ def run_variant(
         "variant": variant,
         "fold": fold,
         "message_passing_layers": (
-            refit_model.num_message_passing_layers if variant == "full_graph" else 0
+            refit_model.num_message_passing_layers if variant in GRAPH_VARIANTS else 0
         ),
         "selected_epoch_from_inner_validation": int(best_epoch),
         "final_refit_epochs": int(best_epoch),
@@ -565,6 +574,7 @@ def run_variant(
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
             "top_k_genes": args.top_k_genes,
+            "num_chemical_features": chemical_width,
         },
         "selected_gene_indices": refit_feature_meta["selected_gene_indices"],
         "expression_scaler_mean": refit_feature_meta["scaler_mean"],
@@ -730,6 +740,22 @@ def main(args) -> dict:
         raise ValueError("Expression gene IDs contain duplicates.")
     validate_pair_expression_alignment(pairs, model_ids)
 
+    chemical_features = None
+    if args.chemical_features is not None:
+        chemical_path = Path(args.chemical_features)
+        if not chemical_path.is_file():
+            raise FileNotFoundError(f"Chemical feature NPZ not found: {chemical_path}")
+        with np.load(chemical_path, allow_pickle=False) as archive:
+            chemical_ids = archive["drug_ids"].astype(str).tolist()
+            chemical_features = archive["features"].astype(np.float32)
+        if chemical_features.ndim != 2 or not np.isfinite(chemical_features).all():
+            raise ValueError("Chemical feature matrix must be finite and two-dimensional.")
+        graph_for_alignment = torch.load(graph_path, map_location="cpu", weights_only=False)
+        expected_ids = [str(value).split(":", 1)[1] for value in graph_for_alignment["drug"].node_ids]
+        if chemical_ids != expected_ids:
+            raise ValueError("Chemical feature drug_ids do not match graph drug-node order.")
+    variants = (*VARIANTS, "chemical_evidence") if chemical_features is not None else VARIANTS
+
     print("Loading typed graph and extracting response-free drug evidence...", flush=True)
     typed_graph = torch.load(graph_path, map_location="cpu", weights_only=False)
     drug_graph = build_compact_drug_graph(typed_graph)
@@ -758,7 +784,7 @@ def main(args) -> dict:
         flush=True,
     )
 
-    variant_oof: dict[str, list[pd.DataFrame]] = {variant: [] for variant in VARIANTS}
+    variant_oof: dict[str, list[pd.DataFrame]] = {variant: [] for variant in variants}
     fold_metrics: list[dict] = []
     for fold in range(1, 6):
         fit_rows, val_rows, outer_test = split_outer_fold_rows(
@@ -771,12 +797,10 @@ def main(args) -> dict:
         scaled_expression, feature_meta = select_and_scale_expression(
             expression, model_ids, fit_groups, args.top_k_genes
         )
-        for variant in VARIANTS:
+        for variant in variants:
             print(f"\n===== Fold {fold}/5 — {variant} =====", flush=True)
-            variant_graph = (
-                restrict_compact_drug_graph(drug_graph, variant)
-                if variant in GRAPH_VARIANTS else drug_graph
-            )
+            graph_level = "gene_evidence" if variant == "chemical_evidence" else variant
+            variant_graph = restrict_compact_drug_graph(drug_graph, graph_level) if variant in GRAPH_VARIANTS else drug_graph
             predictions, metrics, checkpoint = run_variant(
                 variant,
                 fold,
@@ -789,6 +813,7 @@ def main(args) -> dict:
                 model_ids,
                 variant_graph,
                 drug_id_to_index,
+                chemical_features,
                 feature_meta,
                 args,
                 device,
@@ -852,7 +877,7 @@ def main(args) -> dict:
                 actual,
                 combined[f"pred_{variant}_{endpoint}"].to_numpy(dtype=float),
             )
-            for variant in VARIANTS
+            for variant in variants
         }
 
     baseline_dir = ROOT / "data/ai/baselines"
@@ -898,7 +923,8 @@ def main(args) -> dict:
                 "chembl_molecule_to_direct_target",
                 "target_to_gene_symbol_annotation",
             ],
-            "chemical_structure_features_used": False,
+            "chemical_structure_features_used": chemical_features is not None,
+            "chemical_feature_input": str(args.chemical_features) if args.chemical_features else None,
             "interpretation": "ChEMBL molecule nodes are learned entity-ID embeddings connected by curated evidence relations; this is not an atom/bond molecular graph or a chemical-structure GNN.",
             "same_graph_encoder_dimensions": True,
             "same_node_universe_across_graph_levels": True,
@@ -912,7 +938,7 @@ def main(args) -> dict:
         "expression_preprocessing": "Gene variance selection, mean, and standard deviation are refitted using all outer-training cell lines only; preprocessing is not fitted on validation or outer-test cell lines during final refit",
         "baseline_training_scope": "Final GNN refit uses the complete outer-training fold, aligning training-set cell-line/response-row scope with the existing outer-fold baseline estimators",
         "response_edges_used_for_message_passing": False,
-        "model_message_passing_layers": 3,
+        "model_message_passing_layers": 5,
         "drug_evidence_coverage": evidence_coverage,
         "fold_metrics": fold_metrics,
         "overall_metrics": overall,
@@ -942,6 +968,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--graph-file", type=Path, default=DEFAULT_GRAPH)
+    parser.add_argument("--chemical-features", type=Path, default=None,
+                        help="Optional NPZ from build_gdsc2_chemical_features.py; adds chemical_evidence ablation.")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data/ai/gdsc2_pair_gnn_ablations")
     parser.add_argument("--top-k-genes", type=int, default=512)
     parser.add_argument("--hidden-dim", type=int, default=64)
