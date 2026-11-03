@@ -195,6 +195,54 @@ def build_model(
     raise ValueError(f"Unknown ablation variant: {variant}")
 
 
+def validate_full_outer_refit_partition(
+    fit_rows: pd.DataFrame,
+    val_rows: pd.DataFrame,
+    outer_train_rows: pd.DataFrame,
+    test_rows: pd.DataFrame,
+) -> set[str]:
+    """Require final refit rows to contain every outer-train group and no test group."""
+    fit_groups = set(fit_rows["sanger_model_id"].astype(str))
+    val_groups = set(val_rows["sanger_model_id"].astype(str))
+    train_groups = set(outer_train_rows["sanger_model_id"].astype(str))
+    test_groups = set(test_rows["sanger_model_id"].astype(str))
+    if fit_groups & val_groups:
+        raise RuntimeError("Inner fit and validation groups overlap.")
+    if train_groups != (fit_groups | val_groups):
+        raise RuntimeError(
+            "Complete outer-training groups are not exactly the union of inner fit and validation."
+        )
+    if train_groups & test_groups:
+        raise RuntimeError("Outer test cell lines leaked into final refit.")
+    if not train_groups or not test_groups:
+        raise ValueError("Final refit requires non-empty outer-training and outer-test groups.")
+    return train_groups
+
+
+def prepare_full_outer_refit(
+    raw_expression: np.ndarray,
+    model_ids: np.ndarray,
+    outer_train_rows: pd.DataFrame,
+    test_rows: pd.DataFrame,
+    top_k_genes: int,
+) -> tuple[np.ndarray, dict, np.ndarray, np.ndarray]:
+    """Fit expression and target preprocessing on the complete outer-training fold."""
+    if outer_train_rows.empty:
+        raise ValueError("Cannot refit on an empty outer-training fold.")
+    train_groups = set(outer_train_rows["sanger_model_id"].astype(str))
+    test_groups = set(test_rows["sanger_model_id"].astype(str))
+    if train_groups & test_groups:
+        raise ValueError("Outer test cell lines cannot be used for final-refit preprocessing.")
+    refit_expression, feature_meta = select_and_scale_expression(
+        raw_expression, model_ids, train_groups, top_k_genes
+    )
+    target_values = outer_train_rows[list(ENDPOINTS)].to_numpy(dtype=np.float32)
+    target_mean, target_scale = fit_target_scaler(target_values)
+    feature_meta["fit_scope"] = "complete outer-training cell lines"
+    feature_meta["training_cell_lines_for_scaler"] = int(len(train_groups))
+    return refit_expression, feature_meta, target_mean, target_scale
+
+
 def run_variant(
     variant: str,
     fold: int,
@@ -333,31 +381,23 @@ def run_variant(
 
     # Refit the selected architecture from a fresh initialisation on every
     # response row and cell line in the complete outer-training fold.
-    outer_train_groups = set(outer_train_rows["sanger_model_id"].astype(str))
-    expected_train_groups = (
-        set(fit_rows["sanger_model_id"].astype(str))
-        | set(val_rows["sanger_model_id"].astype(str))
+    outer_train_groups = validate_full_outer_refit_partition(
+        fit_rows, val_rows, outer_train_rows, test_rows
     )
-    if outer_train_groups != expected_train_groups:
-        raise RuntimeError(
-            "Outer-training groups are not exactly the union of inner fit and validation."
-        )
-    outer_test_groups = set(test_rows["sanger_model_id"].astype(str))
-    if outer_train_groups & outer_test_groups:
-        raise RuntimeError("Outer test cell lines leaked into final refit.")
-
-    refit_expression, refit_feature_meta = select_and_scale_expression(
+    (
+        refit_expression,
+        refit_feature_meta,
+        refit_target_mean,
+        refit_target_scale,
+    ) = prepare_full_outer_refit(
         raw_expression,
         model_ids,
-        outer_train_groups,
+        outer_train_rows,
+        test_rows,
         args.top_k_genes,
     )
-    refit_target_values = outer_train_rows[list(ENDPOINTS)].to_numpy(
-        dtype=np.float32
-    )
-    refit_target_mean, refit_target_scale = fit_target_scaler(
-        refit_target_values
-    )
+    if refit_feature_meta["training_cell_lines_for_scaler"] != len(outer_train_groups):
+        raise RuntimeError("Final-refit expression scaler did not use all outer-training cell lines.")
 
     # Use a deterministic but separate initialisation stream for the refit.
     set_seed(selection_seed + 1_000_003)
