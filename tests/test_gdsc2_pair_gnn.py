@@ -68,7 +68,7 @@ def test_pair_model_forward_has_two_endpoints():
     compact = build_compact_drug_graph(_tiny_graph())
     model = DrugCellLinePairGNN(
         num_graph_nodes=compact.num_nodes,
-        num_node_types=4,
+        num_node_types=len(compact.node_counts),
         num_relations=compact.num_relations,
         num_drugs=2,
         num_expression_features=8,
@@ -94,7 +94,7 @@ def test_five_layers_allow_pediatric_sample_gene_evidence_to_reach_drug_embeddin
     compact = build_compact_drug_graph(_tiny_graph())
     model = DrugCellLinePairGNN(
         num_graph_nodes=compact.num_nodes,
-        num_node_types=4,
+        num_node_types=len(compact.node_counts),
         num_relations=compact.num_relations,
         num_drugs=2,
         num_expression_features=8,
