@@ -58,6 +58,100 @@ def fit_target_scaler(training_targets: np.ndarray) -> tuple[np.ndarray, np.ndar
     return means.astype(np.float32), scales.astype(np.float32)
 
 
+def validate_pair_expression_alignment(
+    pairs: pd.DataFrame,
+    model_ids: np.ndarray,
+) -> None:
+    """Fail closed if pair rows do not point to their matching expression rows."""
+    required = {
+        "curve_id", "sanger_model_id", "graph_node_id",
+        "expression_row_index", "fold", "drug_id", "ln_ic50", "auc",
+    }
+    missing = required - set(pairs.columns)
+    if missing:
+        raise ValueError(f"Response-pair table is missing columns: {sorted(missing)}")
+    canonical_ids = [str(value).strip() for value in model_ids.tolist()]
+    if any(not value for value in canonical_ids):
+        raise ValueError("Expression metadata contains an empty Sanger model ID.")
+    if len(canonical_ids) != len(set(canonical_ids)):
+        raise ValueError("Expression metadata contains duplicate Sanger model IDs.")
+    pair_ids = pairs["sanger_model_id"].astype(str).str.strip()
+    if pairs["curve_id"].astype(str).duplicated().any():
+        raise ValueError("Response-pair table contains duplicate curve IDs.")
+    row_lookup = {model_id: index for index, model_id in enumerate(canonical_ids)}
+    missing_models = sorted(set(pair_ids) - set(row_lookup))
+    if missing_models:
+        raise ValueError(
+            f"Response Sanger model IDs are absent from expression metadata: {missing_models[:10]}"
+        )
+    expected_rows = pair_ids.map(row_lookup).to_numpy(dtype=np.int64)
+    observed_rows = pd.to_numeric(
+        pairs["expression_row_index"], errors="coerce"
+    ).to_numpy(dtype=float)
+    if (
+        not np.isfinite(observed_rows).all()
+        or not np.equal(observed_rows, np.floor(observed_rows)).all()
+        or not np.array_equal(observed_rows.astype(np.int64), expected_rows)
+    ):
+        raise ValueError(
+            "expression_row_index does not match the NPZ row for its Sanger model ID."
+        )
+    expected_graph_ids = pair_ids.map(lambda value: f"GDSC_MODEL:{value}")
+    observed_graph_ids = pairs["graph_node_id"].astype(str).str.strip()
+    if not observed_graph_ids.equals(expected_graph_ids):
+        raise ValueError("graph_node_id does not match its Sanger model ID.")
+    folds = pd.to_numeric(pairs["fold"], errors="coerce")
+    if folds.isna().any() or not folds.isin(range(1, 6)).all():
+        raise ValueError("Response-pair rows must have frozen fold IDs 1–5.")
+    if pairs.assign(_fold=folds).groupby("sanger_model_id")["_fold"].nunique().gt(1).any():
+        raise ValueError("A Sanger model ID is assigned to multiple outer folds.")
+    targets = pairs[["ln_ic50", "auc"]].apply(
+        pd.to_numeric, errors="coerce"
+    ).to_numpy(dtype=float)
+    if not np.isfinite(targets).all():
+        raise ValueError("Response-pair targets contain missing or non-finite values.")
+
+
+def split_outer_fold_rows(
+    pairs: pd.DataFrame,
+    fold: int,
+    validation_fraction: float,
+    seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Partition cell-line groups into inner-fit, inner-validation, and outer-test."""
+    if fold not in range(1, 6):
+        raise ValueError("Outer fold must be one of the frozen IDs 1–5.")
+    if not 0 < validation_fraction < 1:
+        raise ValueError("validation_fraction must be strictly between zero and one.")
+    if pairs.groupby("sanger_model_id")["fold"].nunique().gt(1).any():
+        raise ValueError("A Sanger model ID is assigned to multiple outer folds.")
+    outer_train = pairs[pairs["fold"] != fold].copy()
+    outer_test = pairs[pairs["fold"] == fold].copy()
+    if outer_train.empty or outer_test.empty:
+        raise ValueError(f"Fold {fold} has empty outer train or test rows.")
+    splitter = GroupShuffleSplit(
+        n_splits=1, test_size=validation_fraction, random_state=seed
+    )
+    fit_index, val_index = next(
+        splitter.split(outer_train, groups=outer_train["sanger_model_id"])
+    )
+    fit_rows = outer_train.iloc[fit_index].copy()
+    val_rows = outer_train.iloc[val_index].copy()
+    fit_groups = set(fit_rows["sanger_model_id"].astype(str))
+    val_groups = set(val_rows["sanger_model_id"].astype(str))
+    test_groups = set(outer_test["sanger_model_id"].astype(str))
+    if fit_groups & val_groups:
+        raise RuntimeError("Inner fit and validation groups overlap.")
+    if fit_groups & test_groups:
+        raise RuntimeError("Outer test cell lines leaked into inner fit.")
+    if val_groups & test_groups:
+        raise RuntimeError("Outer test cell lines leaked into inner validation.")
+    all_groups = set(pairs["sanger_model_id"].astype(str))
+    if fit_groups | val_groups | test_groups != all_groups:
+        raise RuntimeError("Fit/validation/test partition does not cover all cell lines.")
+    return fit_rows, val_rows, outer_test
+
+
 def build_model(
     variant: str,
     drug_graph,
@@ -368,9 +462,15 @@ def main(args) -> dict:
     if set(pairs["sanger_model_id"].astype(str)) - set(model_ids.astype(str)):
         raise ValueError("Some response Sanger model IDs are absent from expression matrix metadata.")
 
+    if len(gene_ids) != len(set(gene_ids.astype(str).tolist())):
+        raise ValueError("Expression gene IDs contain duplicates.")
+    validate_pair_expression_alignment(pairs, model_ids)
+
     print("Loading typed graph and extracting response-free drug evidence...", flush=True)
     typed_graph = torch.load(graph_path, map_location="cpu", weights_only=False)
     drug_graph = build_compact_drug_graph(typed_graph)
+    from src.training.gdsc2_pair_gnn import summarize_drug_evidence_coverage
+    evidence_coverage = summarize_drug_evidence_coverage(drug_graph)
     drug_id_to_index = {
         node_id.split(":", 1)[1]: index
         for index, node_id in enumerate(drug_graph.drug_ids)
@@ -397,23 +497,13 @@ def main(args) -> dict:
     variant_oof: dict[str, list[pd.DataFrame]] = {variant: [] for variant in VARIANTS}
     fold_metrics: list[dict] = []
     for fold in range(1, 6):
-        outer_train = pairs[pairs["fold"] != fold].copy()
-        outer_test = pairs[pairs["fold"] == fold].copy()
-        splitter = GroupShuffleSplit(
-            n_splits=1,
-            test_size=args.validation_fraction,
-            random_state=args.seed + fold,
+        fit_rows, val_rows, outer_test = split_outer_fold_rows(
+            pairs,
+            fold,
+            args.validation_fraction,
+            args.seed + fold,
         )
-        fit_index, val_index = next(
-            splitter.split(outer_train, groups=outer_train["sanger_model_id"])
-        )
-        fit_rows = outer_train.iloc[fit_index].copy()
-        val_rows = outer_train.iloc[val_index].copy()
         fit_groups = set(fit_rows["sanger_model_id"].astype(str))
-        val_groups = set(val_rows["sanger_model_id"].astype(str))
-        if fit_groups.intersection(val_groups):
-            raise RuntimeError("Inner validation split leaks cell lines.")
-
         scaled_expression, feature_meta = select_and_scale_expression(
             expression, model_ids, fit_groups, args.top_k_genes
         )
@@ -534,6 +624,7 @@ def main(args) -> dict:
         "target_scaling": "Separate training-only mean/std per endpoint, fitted on inner-fit response rows; reported predictions inverse-transformed to original units",
         "expression_preprocessing": "Same feature selection and z-scoring within inner-fit cell lines for all variants",
         "response_edges_used_for_message_passing": False,
+        "drug_evidence_coverage": evidence_coverage,
         "fold_metrics": fold_metrics,
         "overall_metrics": overall,
         "external_baseline_comparisons": baseline_comparison,
