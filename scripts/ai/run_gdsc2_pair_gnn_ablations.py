@@ -612,6 +612,8 @@ def compare_external_baselines(
             raise ValueError(f"Duplicate curve IDs in comparator {path}.")
         endpoint = "ln_ic50" if "ln_ic50" in name else "auc"
         variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
+        if f"pred_full_graph_{endpoint}" in oof.columns:
+            variant_cols.append(f"pred_full_graph_{endpoint}")
         selected_baseline = baseline[
             ["curve_id", "fold", "sanger_model_id", actual_column, prediction_column]
         ].rename(
@@ -819,6 +821,8 @@ def main(args) -> dict:
         )
     if combined["curve_id"].duplicated().any():
         raise ValueError("Combined ablation OOF file contains duplicate curves.")
+    combined["pred_full_graph_ln_ic50"] = combined["pred_gene_evidence_ln_ic50"]
+    combined["pred_full_graph_auc"] = combined["pred_gene_evidence_auc"]
     prediction_path = output_dir / "gdsc2_pair_gnn_ablation_oof_predictions.csv"
     metrics_path = output_dir / "gdsc2_pair_gnn_ablation_metrics.json"
     combined.to_csv(prediction_path, index=False)
