@@ -21,32 +21,54 @@ def _tiny_graph():
     graph["gene"].node_ids = ["GENE:A", "GENE:B", "GENE:C"]
     graph["cell_line"].num_nodes = 1
     graph["cell_line"].node_ids = ["GDSC_MODEL:SIDM1"]
+    graph["sample"].num_nodes = 1
+    graph["sample"].node_ids = ["OPENPEDCAN_SAMPLE:S1"]
+    graph["tumor_type"].num_nodes = 1
+    graph["tumor_type"].node_ids = ["TUMOR:NB"]
+    graph["diagnosis"].num_nodes = 1
+    graph["diagnosis"].node_ids = ["DIAGNOSIS:NB"]
+    graph["cohort"].num_nodes = 1
+    graph["cohort"].node_ids = ["COHORT:C1"]
+    graph["molecular_subtype"].num_nodes = 1
+    graph["molecular_subtype"].node_ids = ["SUBTYPE:S1"]
+    graph["fusion"].num_nodes = 1
+    graph["fusion"].node_ids = ["FUSION:F1"]
     graph["drug", "exact_name_chembl_mapping", "chembl_molecule"].edge_index = torch.tensor([[0, 1], [0, 1]])
     graph["chembl_molecule", "chembl_direct_mechanism", "target"].edge_index = torch.tensor([[0, 1], [0, 1]])
     graph["target", "has_chembl_gene_symbol", "gene"].edge_index = torch.tensor([[0, 1], [0, 1]])
+    graph["sample", "has_gene_variant", "gene"].edge_index = torch.tensor([[0], [0]])
+    graph["tumor_type", "copy_number_in_tumor", "gene"].edge_index = torch.tensor([[0], [0]])
+    graph["sample", "classified_as", "tumor_type"].edge_index = torch.tensor([[0], [0]])
+    graph["sample", "has_diagnosis", "diagnosis"].edge_index = torch.tensor([[0], [0]])
+    graph["sample", "from_cohort", "cohort"].edge_index = torch.tensor([[0], [0]])
+    graph["sample", "has_molecular_subtype", "molecular_subtype"].edge_index = torch.tensor([[0], [0]])
+    graph["sample", "has_fusion", "fusion"].edge_index = torch.tensor([[0], [0]])
+    graph["fusion", "fusion_gene", "gene"].edge_index = torch.tensor([[0], [1]])
     # This relation is deliberately present in the source graph and must not be copied.
     graph["drug", "gdsc2_response", "cell_line"].edge_index = torch.tensor([[0], [0]])
     graph["drug", "gdsc2_response", "cell_line"].ln_ic50 = torch.tensor([123.0])
     return graph
 
 
-def test_compact_graph_contains_only_target_evidence_relations():
+def test_compact_graph_contains_drug_and_pediatric_context_without_response_edges():
     compact = build_compact_drug_graph(_tiny_graph())
     assert compact.drug_ids == ["GDSC_DRUG:1", "GDSC_DRUG:2"]
-    assert compact.node_counts == {
-        "drug": 2, "chembl_molecule": 2, "target": 2, "gene": 2
-    }
-    assert compact.num_relations == 6
-    assert compact.edge_index.shape == (2, 12)
-    assert compact.edge_type.shape == (12,)
-    assert compact.edge_type.max().item() < 6
+    assert compact.node_counts["drug"] == 2
+    assert compact.node_counts["sample"] == 1
+    assert compact.node_counts["tumor_type"] == 1
+    assert compact.node_counts["gene"] == 2
+    assert compact.num_relations == 22
+    assert compact.edge_index.shape[1] > 12
+    assert compact.edge_type.shape[0] == compact.edge_index.shape[1]
+    assert compact.edge_type.max().item() < compact.num_relations
+    assert not any("gdsc2_response" in relation for relation in compact.relation_names)
 
 
 def test_pair_model_forward_has_two_endpoints():
     compact = build_compact_drug_graph(_tiny_graph())
     model = DrugCellLinePairGNN(
         num_graph_nodes=compact.num_nodes,
-        num_node_types=4,
+        num_node_types=len(compact.node_counts),
         num_relations=compact.num_relations,
         num_drugs=2,
         num_expression_features=8,
@@ -67,19 +89,19 @@ def test_pair_model_forward_has_two_endpoints():
 
 
 
-def test_three_layers_allow_gene_evidence_to_reach_drug_embedding():
+def test_five_layers_allow_pediatric_sample_gene_evidence_to_reach_drug_embedding():
     torch.manual_seed(17)
     compact = build_compact_drug_graph(_tiny_graph())
     model = DrugCellLinePairGNN(
         num_graph_nodes=compact.num_nodes,
-        num_node_types=4,
+        num_node_types=len(compact.node_counts),
         num_relations=compact.num_relations,
         num_drugs=2,
         num_expression_features=8,
         hidden_dim=16,
         dropout=0.0,
     )
-    assert model.num_message_passing_layers == 3
+    assert model.num_message_passing_layers == 5
     model.eval()
     expression = torch.zeros(1, 8)
     drug_embeddings, _ = model.encode(
@@ -88,16 +110,19 @@ def test_three_layers_allow_gene_evidence_to_reach_drug_embedding():
     probe = torch.arange(1, 17, dtype=torch.float32)
     (drug_embeddings[0] * probe).sum().backward()
 
-    # Compact node ordering is drug, molecule, target, gene; gene A is node 6.
-    gene_a_index = (
-        compact.node_counts["drug"]
-        + compact.node_counts["chembl_molecule"]
-        + compact.node_counts["target"]
-    )
+    # The first shared gene is reached from the pediatric sample by one
+    # reverse message-passing hop, then can traverse the target/molecule/drug path.
+    gene_offset = sum(compact.node_counts[name] for name in compact.node_types[:3])
+    gene_a_index = gene_offset
     gene_gradient = model.entity_embedding.weight.grad[gene_a_index]
     assert gene_gradient is not None
     assert torch.isfinite(gene_gradient).all()
     assert gene_gradient.abs().sum().item() > 0
+    sample_offset = sum(compact.node_counts[name] for name in compact.node_types[:4])
+    sample_gradient = model.entity_embedding.weight.grad[sample_offset]
+    assert sample_gradient is not None
+    assert torch.isfinite(sample_gradient).all()
+    assert sample_gradient.abs().sum().item() > 0
 
 
 def test_evidence_coverage_counts_complete_gene_paths():
@@ -127,14 +152,13 @@ def test_nested_evidence_graph_views_enable_progressively_more_relations():
     targets = restrict_compact_drug_graph(compact, "target_evidence")
     genes = restrict_compact_drug_graph(compact, "gene_evidence")
 
-    assert mapping.num_nodes == targets.num_nodes == genes.num_nodes == compact.num_nodes
-    assert mapping.num_relations == targets.num_relations == genes.num_relations == compact.num_relations
+    pediatric = restrict_compact_drug_graph(compact, "pediatric_context")
+    assert mapping.num_nodes == targets.num_nodes == genes.num_nodes == pediatric.num_nodes == compact.num_nodes
+    assert mapping.num_relations == targets.num_relations == genes.num_relations == pediatric.num_relations == compact.num_relations
     assert torch.equal(mapping.node_type, targets.node_type)
     assert torch.equal(targets.node_type, genes.node_type)
-    assert mapping.edge_type.unique().tolist() == [0, 3]
-    assert targets.edge_type.unique().tolist() == [0, 1, 3, 4]
-    assert genes.edge_type.unique().tolist() == [0, 1, 2, 3, 4, 5]
     assert mapping.edge_index.shape[1] < targets.edge_index.shape[1] < genes.edge_index.shape[1]
+    assert pediatric.edge_index.shape[1] > genes.edge_index.shape[1]
 
 
 def test_nested_evidence_graph_rejects_unknown_level():

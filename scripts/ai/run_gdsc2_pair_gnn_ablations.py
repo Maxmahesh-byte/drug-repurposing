@@ -2,7 +2,7 @@
 """Run fold-matched ablations for the GDSC2 drug/cell-line response model.
 
 Variants:
-  full_graph: RGCN drug encoder + expression encoder + pair head.
+  pediatric_context: RGCN drug encoder + OpenPedCan context + expression encoder + pair head.
   drug_id_only: learned drug-ID embeddings + expression encoder, no graph edges.
   expression_only: expression encoder only, no drug identity or graph.
 
@@ -46,7 +46,7 @@ from src.training.gdsc2_pair_gnn import (
 from src.training.gdsc2_pair_ablations import DrugIdExpressionModel, ExpressionOnlyModel
 
 ENDPOINTS = ("ln_ic50", "auc")
-GRAPH_VARIANTS = ("chembl_mapping", "target_evidence", "gene_evidence")
+GRAPH_VARIANTS = ("chembl_mapping", "target_evidence", "gene_evidence", "pediatric_context")
 VARIANTS = ("drug_id_only", *GRAPH_VARIANTS, "expression_only")
 LEGACY_VARIANT_ALIASES = {"full_graph": "gene_evidence"}
 
