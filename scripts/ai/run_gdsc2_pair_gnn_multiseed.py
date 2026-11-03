@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Run additional fixed-fold GDSC2 ablation seeds and analyze them together.
+"""Run fixed-fold GDSC2 ablation seeds with full outer-training refits.
 
-By default, seed 42 is reused from the already-completed reference run and
-seeds 43-46 are trained sequentially. Every new seed gets a separate output
-directory. The existing OOF predictions are rechecked for identical curve IDs,
-outer folds, and observed targets before the uncertainty report is produced.
+By default, seed 42 is reused from a prior reference run and seeds 43-46 are
+trained sequentially. With --fresh-run-set, every supplied seed is trained
+from scratch. The underlying runner selects epoch count on an inner group
+validation split, then reinitialises and refits each variant on the complete
+outer-training fold before evaluating the untouched outer-test fold.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -186,6 +188,13 @@ def main(args) -> dict:
         "oof_runs_included": [str(path) for path in all_runs],
         "all_runs_validated_same_curve_ids_folds_and_observed_targets": True,
         "same_outer_split": "frozen five-fold GroupKFold by Sanger model ID; folds 1-5",
+        "training_protocol": (
+            "Inner group validation selects epoch count only. The runner then "
+            "reinitialises each variant, refits expression selection/scaling and "
+            "endpoint target scalers on the full outer-training fold, and trains "
+            "for the selected epoch count on all outer-training response rows "
+            "before one-time prediction on the untouched outer-test fold."
+        ),
         "training_configuration": {
             "epochs": args.epochs,
             "patience": args.patience,

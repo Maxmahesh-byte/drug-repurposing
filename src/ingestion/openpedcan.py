@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Iterable
 from urllib.request import Request, urlopen
@@ -122,6 +123,19 @@ def load_openpedcan_dataset(raw_dir: str | Path | None = None) -> pd.DataFrame:
         "place histologies.tsv under data/raw/openpedcan/ or set OPENPEDCAN_DATA_PATH to its path. "
         "Set OPENPEDCAN_ALLOW_SYNTHETIC_FALLBACK=1 only for development."
     )
+
+
+def _snake_case_column(name: str) -> str:
+    value = re.sub(r"[^0-9A-Za-z]+", "_", str(name).strip())
+    value = re.sub(r"_+", "_", value).strip("_").lower()
+    return value
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with human-readable column labels converted to snake_case."""
+    normalized = df.copy()
+    normalized.columns = [_snake_case_column(column) for column in normalized.columns]
+    return normalized
 
 
 def standardize_openpedcan_columns(df: pd.DataFrame) -> pd.DataFrame:
