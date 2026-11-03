@@ -357,6 +357,8 @@ def run_variant(
             "top_k_genes": args.top_k_genes,
         },
         "selected_gene_indices": feature_meta["selected_gene_indices"],
+        "expression_scaler_mean": feature_meta["scaler_mean"],
+        "expression_scaler_scale": feature_meta["scaler_scale"],
         "expression_scaler_fit_scope": feature_meta["fit_scope"],
     }
     return result, metrics, checkpoint
@@ -624,6 +626,7 @@ def main(args) -> dict:
         "target_scaling": "Separate training-only mean/std per endpoint, fitted on inner-fit response rows; reported predictions inverse-transformed to original units",
         "expression_preprocessing": "Same feature selection and z-scoring within inner-fit cell lines for all variants",
         "response_edges_used_for_message_passing": False,
+        "model_message_passing_layers": 3,
         "drug_evidence_coverage": evidence_coverage,
         "fold_metrics": fold_metrics,
         "overall_metrics": overall,
