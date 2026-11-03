@@ -75,7 +75,15 @@ def validate_pair_expression_alignment(
         raise ValueError("Expression metadata contains an empty Sanger model ID.")
     if len(canonical_ids) != len(set(canonical_ids)):
         raise ValueError("Expression metadata contains duplicate Sanger model IDs.")
-    pair_ids = pairs["sanger_model_id"].astype(str).str.strip()
+    raw_pair_ids = pairs["sanger_model_id"].astype(str)
+    if not raw_pair_ids.equals(raw_pair_ids.str.strip()):
+        raise ValueError("Response-pair Sanger model IDs contain surrounding whitespace.")
+    pair_ids = raw_pair_ids
+    raw_drug_ids = pairs["drug_id"].astype(str)
+    if raw_drug_ids.str.strip().eq("").any() or not raw_drug_ids.equals(raw_drug_ids.str.strip()):
+        raise ValueError("Response-pair drug IDs are blank or contain surrounding whitespace.")
+    if pairs["curve_id"].astype(str).str.strip().eq("").any():
+        raise ValueError("Response-pair table contains blank curve IDs.")
     if pairs["curve_id"].astype(str).duplicated().any():
         raise ValueError("Response-pair table contains duplicate curve IDs.")
     row_lookup = {model_id: index for index, model_id in enumerate(canonical_ids)}
@@ -349,6 +357,9 @@ def run_variant(
         "state_dict": best_state,
         "variant": variant,
         "fold": fold,
+        "message_passing_layers": (
+            model.num_message_passing_layers if variant == "full_graph" else 0
+        ),
         "target_mean": target_mean,
         "target_scale": target_scale,
         "model_config": {
