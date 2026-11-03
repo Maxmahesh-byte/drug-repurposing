@@ -17,7 +17,7 @@ from src.training.gdsc2_pair_ablations import (
     DrugIdExpressionModel,
     ExpressionOnlyModel,
 )
-from src.training.gdsc2_pair_gnn import build_compact_drug_graph
+from src.training.gdsc2_pair_gnn import build_compact_drug_graph, restrict_compact_drug_graph
 from torch_geometric.data import HeteroData
 from types import SimpleNamespace
 
@@ -399,3 +399,17 @@ def test_full_outer_refit_partition_rejects_missing_training_response_rows():
         validate_full_outer_refit_partition(
             fit_rows, val_rows, outer_train, test_rows
         )
+
+
+
+def test_graph_ablation_build_model_preserves_dimensions_across_levels():
+    from scripts.ai.run_gdsc2_pair_gnn_ablations import build_model
+    compact = _tiny_response_free_graph()
+    args = SimpleNamespace(hidden_dim=8, dropout=0.0)
+    models = [
+        build_model(level, restrict_compact_drug_graph(compact, level), 2, 8, args)
+        for level in ("chembl_mapping", "target_evidence", "gene_evidence")
+    ]
+    assert [model.num_message_passing_layers for model in models] == [3, 3, 3]
+    assert [model.entity_embedding.num_embeddings for model in models] == [compact.num_nodes] * 3
+    assert [model.drug_conv1.num_relations for model in models] == [compact.num_relations] * 3

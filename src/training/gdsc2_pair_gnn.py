@@ -171,6 +171,67 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     )
 
 
+
+EVIDENCE_LEVEL_RELATION_LIMITS = {
+    "chembl_mapping": 1,
+    "target_evidence": 2,
+    "gene_evidence": 3,
+}
+
+
+def restrict_compact_drug_graph(
+    graph: CompactDrugGraph,
+    evidence_level: str,
+) -> CompactDrugGraph:
+    """Return a relation-masked view while preserving node IDs and model dimensions.
+
+    The three nested evidence levels are:
+      chembl_mapping: drug <-> ChEMBL molecule mapping only;
+      target_evidence: mapping plus molecule <-> direct target;
+      gene_evidence: mapping, direct target, and target <-> gene annotation.
+
+    This graph contains entity-ID embeddings and typed relationships, not atom/bond
+    chemical structures or learned molecular fingerprints. All node rows and all
+    six relation parameter slots are retained across levels so graph ablations
+    share the same encoder dimensions; only enabled message-passing edges differ.
+    """
+    if evidence_level not in EVIDENCE_LEVEL_RELATION_LIMITS:
+        raise ValueError(
+            f"Unknown evidence level {evidence_level!r}; expected one of "
+            f"{sorted(EVIDENCE_LEVEL_RELATION_LIMITS)}."
+        )
+    relation_limit = EVIDENCE_LEVEL_RELATION_LIMITS[evidence_level]
+    forward_relation_count = len(RELATIONS)
+    if graph.num_relations != 2 * forward_relation_count:
+        raise ValueError(
+            "Compact graph relation count does not match the configured evidence schema."
+        )
+    allowed_relation_ids = set(range(relation_limit)) | {
+        forward_relation_count + index for index in range(relation_limit)
+    }
+    keep_mask = torch.zeros_like(graph.edge_type, dtype=torch.bool)
+    for relation_id in allowed_relation_ids:
+        keep_mask |= graph.edge_type.eq(relation_id)
+
+    relation_counts = {
+        "::".join(relation): (
+            int(graph.relation_counts.get("::".join(relation), 0))
+            if relation_index < relation_limit else 0
+        )
+        for relation_index, relation in enumerate(RELATIONS)
+    }
+    return CompactDrugGraph(
+        edge_index=graph.edge_index[:, keep_mask].contiguous(),
+        edge_type=graph.edge_type[keep_mask].contiguous(),
+        node_type=graph.node_type,
+        drug_indices=graph.drug_indices,
+        drug_ids=list(graph.drug_ids),
+        num_nodes=graph.num_nodes,
+        num_relations=graph.num_relations,
+        node_counts=dict(graph.node_counts),
+        relation_counts=relation_counts,
+    )
+
 def summarize_drug_evidence_coverage(graph: CompactDrugGraph) -> dict[str, Any]:
     """Count drug nodes with complete evidence paths in the response-free graph."""
     edge_arrays = {

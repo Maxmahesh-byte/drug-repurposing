@@ -4,6 +4,7 @@ from torch_geometric.data import HeteroData
 from src.training.gdsc2_pair_gnn import (
     DrugCellLinePairGNN,
     build_compact_drug_graph,
+    restrict_compact_drug_graph,
     summarize_drug_evidence_coverage,
 )
 
@@ -117,3 +118,30 @@ def test_invalid_typed_relation_indices_are_rejected():
         assert "Source node index out of range" in str(exc)
     else:
         raise AssertionError("Out-of-range typed graph edge should be rejected.")
+
+
+
+def test_nested_evidence_graph_views_enable_progressively_more_relations():
+    compact = build_compact_drug_graph(_tiny_graph())
+    mapping = restrict_compact_drug_graph(compact, "chembl_mapping")
+    targets = restrict_compact_drug_graph(compact, "target_evidence")
+    genes = restrict_compact_drug_graph(compact, "gene_evidence")
+
+    assert mapping.num_nodes == targets.num_nodes == genes.num_nodes == compact.num_nodes
+    assert mapping.num_relations == targets.num_relations == genes.num_relations == compact.num_relations
+    assert torch.equal(mapping.node_type, targets.node_type)
+    assert torch.equal(targets.node_type, genes.node_type)
+    assert mapping.edge_type.unique().tolist() == [0, 3]
+    assert targets.edge_type.unique().tolist() == [0, 1, 3, 4]
+    assert genes.edge_type.unique().tolist() == [0, 1, 2, 3, 4, 5]
+    assert mapping.edge_index.shape[1] < targets.edge_index.shape[1] < genes.edge_index.shape[1]
+
+
+def test_nested_evidence_graph_rejects_unknown_level():
+    compact = build_compact_drug_graph(_tiny_graph())
+    try:
+        restrict_compact_drug_graph(compact, "chemical_structure")
+    except ValueError as exc:
+        assert "Unknown evidence level" in str(exc)
+    else:
+        raise AssertionError("Unknown graph evidence level should be rejected.")

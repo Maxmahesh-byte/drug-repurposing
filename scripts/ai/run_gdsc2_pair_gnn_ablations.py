@@ -38,11 +38,21 @@ from scripts.ai.train_gdsc2_pair_gnn import (
     set_seed,
     sha256_file,
 )
-from src.training.gdsc2_pair_gnn import DrugCellLinePairGNN, build_compact_drug_graph
+from src.training.gdsc2_pair_gnn import (
+    DrugCellLinePairGNN,
+    build_compact_drug_graph,
+    restrict_compact_drug_graph,
+)
 from src.training.gdsc2_pair_ablations import DrugIdExpressionModel, ExpressionOnlyModel
 
 ENDPOINTS = ("ln_ic50", "auc")
-VARIANTS = ("full_graph", "drug_id_only", "expression_only")
+GRAPH_VARIANTS = ("chembl_mapping", "target_evidence", "gene_evidence")
+VARIANTS = ("drug_id_only", *GRAPH_VARIANTS, "expression_only")
+LEGACY_VARIANT_ALIASES = {"full_graph": "gene_evidence"}
+
+
+def canonicalize_variant(variant: str) -> str:
+    return LEGACY_VARIANT_ALIASES.get(variant, variant)
 
 
 def fit_target_scaler(training_targets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -169,7 +179,8 @@ def build_model(
     num_expression_features: int,
     args,
 ) -> torch.nn.Module:
-    if variant == "full_graph":
+    variant = canonicalize_variant(variant)
+    if variant in GRAPH_VARIANTS:
         return DrugCellLinePairGNN(
             num_graph_nodes=drug_graph.num_nodes,
             num_node_types=len(drug_graph.node_counts),
@@ -272,6 +283,7 @@ def run_variant(
     device: torch.device,
 ) -> tuple[pd.DataFrame, dict, dict]:
     """Select epoch on inner split, then refit from scratch on all outer-train rows."""
+    variant = canonicalize_variant(variant)
     selection_seed = args.seed + fold * 101
     set_seed(selection_seed)
     num_drugs = len(drug_graph.drug_ids)
@@ -326,7 +338,7 @@ def run_variant(
 
     def predict_selection(drug_indices, cell_indices):
         model.eval()
-        if variant == "full_graph":
+        if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = model.encode(
                 selection_expression_tensor, edge_index, edge_type, node_type
             )
@@ -343,7 +355,7 @@ def run_variant(
     for epoch in range(1, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        if variant == "full_graph":
+        if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = model.encode(
                 selection_expression_tensor, edge_index, edge_type, node_type
             )
@@ -441,7 +453,7 @@ def run_variant(
 
     def predict_refit(drug_indices, cell_indices):
         refit_model.eval()
-        if variant == "full_graph":
+        if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = refit_model.encode(
                 refit_expression_tensor, edge_index, edge_type, node_type
             )
@@ -456,7 +468,7 @@ def run_variant(
     for refit_epoch in range(1, best_epoch + 1):
         refit_model.train()
         refit_optimizer.zero_grad(set_to_none=True)
-        if variant == "full_graph":
+        if variant in GRAPH_VARIANTS:
             drug_embeddings, cell_embeddings = refit_model.encode(
                 refit_expression_tensor, edge_index, edge_type, node_type
             )
@@ -599,7 +611,26 @@ def compare_external_baselines(
         if baseline["curve_id"].duplicated().any():
             raise ValueError(f"Duplicate curve IDs in comparator {path}.")
         endpoint = "ln_ic50" if "ln_ic50" in name else "auc"
-        variant_cols = [f"pred_{variant}_{endpoint}" for variant in VARIANTS]
+        available_variant_columns = {
+            variant: f"pred_{variant}_{endpoint}"
+            for variant in VARIANTS
+            if f"pred_{variant}_{endpoint}" in oof.columns
+        }
+        legacy_full_graph_column = f"pred_full_graph_{endpoint}"
+        if legacy_full_graph_column in oof.columns:
+            available_variant_columns.setdefault("full_graph", legacy_full_graph_column)
+        variant_cols = list(dict.fromkeys(available_variant_columns.values()))
+        required_oof_columns = {"curve_id", "fold", "sanger_model_id", f"actual_{endpoint}"}
+        missing_oof_columns = required_oof_columns - set(oof.columns)
+        if missing_oof_columns:
+            raise ValueError(
+                f"OOF predictions are missing required identity/target columns: "
+                f"{sorted(missing_oof_columns)}"
+            )
+        if not variant_cols:
+            raise ValueError(
+                f"OOF predictions contain no recognized model prediction columns for {endpoint}."
+            )
         selected_baseline = baseline[
             ["curve_id", "fold", "sanger_model_id", actual_column, prediction_column]
         ].rename(
@@ -640,9 +671,9 @@ def compare_external_baselines(
         prediction_metrics = {
             variant: metric_block(
                 actual_oof,
-                joined[f"pred_{variant}_{endpoint}"].to_numpy(dtype=float),
+                joined[column].to_numpy(dtype=float),
             )
-            for variant in VARIANTS
+            for variant, column in available_variant_columns.items()
         }
         prediction_metrics["external_baseline"] = metric_block(
             actual_oof, joined[prediction_column].to_numpy(dtype=float)
@@ -742,6 +773,10 @@ def main(args) -> dict:
         )
         for variant in VARIANTS:
             print(f"\n===== Fold {fold}/5 — {variant} =====", flush=True)
+            variant_graph = (
+                restrict_compact_drug_graph(drug_graph, variant)
+                if variant in GRAPH_VARIANTS else drug_graph
+            )
             predictions, metrics, checkpoint = run_variant(
                 variant,
                 fold,
@@ -752,7 +787,7 @@ def main(args) -> dict:
                 expression,
                 scaled_expression,
                 model_ids,
-                drug_graph,
+                variant_graph,
                 drug_id_to_index,
                 feature_meta,
                 args,
@@ -803,6 +838,8 @@ def main(args) -> dict:
         )
     if combined["curve_id"].duplicated().any():
         raise ValueError("Combined ablation OOF file contains duplicate curves.")
+    combined["pred_full_graph_ln_ic50"] = combined["pred_gene_evidence_ln_ic50"]
+    combined["pred_full_graph_auc"] = combined["pred_gene_evidence_auc"]
     prediction_path = output_dir / "gdsc2_pair_gnn_ablation_oof_predictions.csv"
     metrics_path = output_dir / "gdsc2_pair_gnn_ablation_metrics.json"
     combined.to_csv(prediction_path, index=False)
@@ -849,9 +886,23 @@ def main(args) -> dict:
         "status": "completed",
         "experiment": "matched five-fold controlled model ablations",
         "variants": {
-            "full_graph": "RGCN drug-target evidence encoder + expression encoder + pair head",
             "drug_id_only": "learned drug identity embedding + expression encoder; no graph propagation",
+            "chembl_mapping": "RGCN + expression; drug-to-ChEMBL-molecule mapping edges only",
+            "target_evidence": "RGCN + expression; mapping and direct molecule-to-target evidence edges",
+            "gene_evidence": "RGCN + expression; mapping, direct target, and target-to-gene annotation edges",
             "expression_only": "expression encoder only; no drug identity or graph",
+        },
+        "graph_ablation_design": {
+            "nested_evidence_levels": [
+                "drug_to_chembl_molecule_mapping",
+                "chembl_molecule_to_direct_target",
+                "target_to_gene_symbol_annotation",
+            ],
+            "chemical_structure_features_used": False,
+            "interpretation": "ChEMBL molecule nodes are learned entity-ID embeddings connected by curated evidence relations; this is not an atom/bond molecular graph or a chemical-structure GNN.",
+            "same_graph_encoder_dimensions": True,
+            "same_node_universe_across_graph_levels": True,
+            "only_enabled_message_passing_edges_change": True,
         },
         "scope": "GDSC2 measured in-vitro single-agent response for known drugs and exact-name-matched cell lines",
         "outer_split": "frozen five-fold GroupKFold by Sanger model ID; folds 1-5",
