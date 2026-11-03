@@ -2,7 +2,11 @@ import pytest
 import numpy as np
 import torch
 
-from scripts.ai.run_gdsc2_pair_gnn_ablations import (\n    fit_target_scaler,\n    split_outer_fold_rows,\n    validate_pair_expression_alignment,\n)\nfrom scripts.ai.train_gdsc2_pair_gnn import select_and_scale_expression
+from scripts.ai.run_gdsc2_pair_gnn_ablations import (
+    fit_target_scaler,
+    split_outer_fold_rows,
+    validate_pair_expression_alignment,
+)\nfrom scripts.ai.train_gdsc2_pair_gnn import select_and_scale_expression
 from src.training.gdsc2_pair_ablations import (
     DrugIdExpressionModel,
     ExpressionOnlyModel,
