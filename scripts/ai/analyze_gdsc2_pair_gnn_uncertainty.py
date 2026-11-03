@@ -136,6 +136,7 @@ def cluster_bootstrap_mae_difference(
 
 
 def load_run(path: Path) -> pd.DataFrame:
+    """Load nested-evidence or legacy three-model OOF predictions."""
     if not path.is_file():
         raise FileNotFoundError(f"Ablation OOF file not found: {path}")
     frame = pd.read_csv(
@@ -149,11 +150,24 @@ def load_run(path: Path) -> pd.DataFrame:
     required = {
         "curve_id", "sanger_model_id", "fold",
         "actual_ln_ic50", "actual_auc",
-        *[f"pred_{variant}_{endpoint}" for variant in VARIANTS for endpoint in ENDPOINTS],
+        "pred_drug_id_only_ln_ic50", "pred_drug_id_only_auc",
+        "pred_expression_only_ln_ic50", "pred_expression_only_auc",
     }
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"{path} is missing required OOF columns: {sorted(missing)}")
+    for endpoint in ENDPOINTS:
+        gene_column = f"pred_gene_evidence_{endpoint}"
+        legacy_column = f"pred_full_graph_{endpoint}"
+        if gene_column not in frame.columns:
+            if legacy_column not in frame.columns:
+                raise ValueError(
+                    f"{path} must contain either {gene_column!r} or "
+                    f"the legacy {legacy_column!r} column."
+                )
+            frame[gene_column] = frame[legacy_column]
+        if legacy_column not in frame.columns:
+            frame[legacy_column] = frame[gene_column]
     if frame["curve_id"].duplicated().any():
         raise ValueError(f"{path} contains duplicate curve IDs.")
     frame["fold"] = pd.to_numeric(frame["fold"], errors="raise").astype(int)
@@ -163,8 +177,19 @@ def load_run(path: Path) -> pd.DataFrame:
         raise ValueError(f"{path} contains empty Sanger model IDs.")
     if frame.groupby("sanger_model_id")["fold"].nunique().gt(1).any():
         raise ValueError(f"{path} assigns a Sanger model to multiple folds.")
+    numeric_columns = [
+        "actual_ln_ic50", "actual_auc",
+        *[column for column in frame.columns if column.startswith("pred_")],
+    ]
+    numeric = frame[numeric_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(numeric).all():
+        raise ValueError(f"{path} contains non-finite response targets or predictions.")
+    available = [variant for variant in VARIANTS
+                 if all(f"pred_{variant}_{endpoint}" in frame.columns for endpoint in ENDPOINTS)]
+    if "gene_evidence" not in available:
+        available.append("gene_evidence")
+    frame.attrs["available_variants"] = available
     return frame.sort_values("curve_id").reset_index(drop=True)
-
 
 def join_external_comparator(
     run_frame: pd.DataFrame,
@@ -261,7 +286,11 @@ def main(args) -> dict[str, Any]:
         for endpoint in ENDPOINTS:
             actual_column = f"actual_{endpoint}"
             actual = frame[actual_column].to_numpy(dtype=float)
-            for variant in VARIANTS:
+            available_variants = [
+                variant for variant in VARIANTS
+                if f"pred_{variant}_{endpoint}" in frame.columns
+            ]
+            for variant in available_variants:
                 prediction_column = f"pred_{variant}_{endpoint}"
                 metrics = metric_block(actual, frame[prediction_column].to_numpy(dtype=float))
                 metric_rows.append(
@@ -270,12 +299,18 @@ def main(args) -> dict[str, Any]:
                     }
                 )
 
-            comparisons = [
+            candidate_comparisons = [
                 ("chembl_mapping", "drug_id_only"),
                 ("target_evidence", "chembl_mapping"),
                 ("gene_evidence", "target_evidence"),
                 ("gene_evidence", "drug_id_only"),
                 ("gene_evidence", "expression_only"),
+            ]
+            comparisons = [
+                (model_a, model_b)
+                for model_a, model_b in candidate_comparisons
+                if f"pred_{model_a}_{endpoint}" in frame.columns
+                and f"pred_{model_b}_{endpoint}" in frame.columns
             ]
             for model_a, model_b in comparisons:
                 key = f"{endpoint}:{model_a}_vs_{model_b}"
