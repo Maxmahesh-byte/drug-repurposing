@@ -417,7 +417,7 @@ def run_variant(
     refit_train_drugs, refit_train_cells = pair_indices_for(outer_train_rows)
     test_drugs, test_cells = pair_indices_for(test_rows)
     refit_targets_raw = torch.tensor(
-        refit_target_values,
+        outer_train_rows[list(ENDPOINTS)].to_numpy(dtype=np.float32),
         dtype=torch.float32,
         device=device,
     )
