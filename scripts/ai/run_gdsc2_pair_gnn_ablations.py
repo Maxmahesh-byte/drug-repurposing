@@ -212,6 +212,18 @@ def validate_full_outer_refit_partition(
         raise RuntimeError(
             "Complete outer-training groups are not exactly the union of inner fit and validation."
         )
+    fit_curves = set(fit_rows["curve_id"].astype(str))
+    val_curves = set(val_rows["curve_id"].astype(str))
+    train_curves = set(outer_train_rows["curve_id"].astype(str))
+    test_curves = set(test_rows["curve_id"].astype(str))
+    if fit_curves & val_curves:
+        raise RuntimeError("Inner fit and validation response curves overlap.")
+    if train_curves != (fit_curves | val_curves):
+        raise RuntimeError(
+            "Full outer-training response curves are not exactly the union of inner fit and validation."
+        )
+    if train_curves & test_curves:
+        raise RuntimeError("Outer test response curves leaked into final refit.")
     if train_groups & test_groups:
         raise RuntimeError("Outer test cell lines leaked into final refit.")
     if not train_groups or not test_groups:
