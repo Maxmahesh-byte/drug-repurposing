@@ -385,3 +385,17 @@ def test_final_refit_checkpoint_is_independent_of_outer_test_labels():
     assert np.allclose(first_checkpoint["target_mean"], second_checkpoint["target_mean"])
     for key, value in first_checkpoint["state_dict"].items():
         assert torch.equal(value, second_checkpoint["state_dict"][key]), key
+
+
+
+def test_full_outer_refit_partition_rejects_missing_training_response_rows():
+    pairs = _pair_rows_for_fold_test()
+    fit_rows, val_rows, test_rows = split_outer_fold_rows(
+        pairs, fold=1, validation_fraction=0.25, seed=93
+    )
+    outer_train = pairs[pairs["fold"] != 1].copy()
+    outer_train = outer_train.iloc[:-1].copy()
+    with pytest.raises(RuntimeError, match="response curves"):
+        validate_full_outer_refit_partition(
+            fit_rows, val_rows, outer_train, test_rows
+        )
