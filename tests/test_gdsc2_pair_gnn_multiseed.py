@@ -94,3 +94,38 @@ def test_fresh_run_set_cannot_require_reference():
             fresh_run_set=True,
             require_reference=True,
         )
+
+
+
+def test_oof_validator_aliases_legacy_full_graph_to_gene_evidence(tmp_path):
+    path = tmp_path / "legacy_oof.csv"
+    _oof_frame().to_csv(path, index=False)
+    loaded = MODULE.validate_oof_file(path)
+    assert np.array_equal(
+        loaded["pred_gene_evidence_ln_ic50"].to_numpy(),
+        loaded["pred_full_graph_ln_ic50"].to_numpy(),
+    )
+    assert np.array_equal(
+        loaded["pred_gene_evidence_auc"].to_numpy(),
+        loaded["pred_full_graph_auc"].to_numpy(),
+    )
+
+
+def test_oof_validator_requires_intermediate_layers_for_new_runs(tmp_path):
+    path = tmp_path / "legacy_oof.csv"
+    _oof_frame().to_csv(path, index=False)
+    with pytest.raises(ValueError, match="nested evidence-layer prediction columns"):
+        MODULE.validate_oof_file(path, require_evidence_layers=True)
+
+
+def test_oof_validator_accepts_complete_nested_evidence_schema(tmp_path):
+    path = tmp_path / "nested_oof.csv"
+    frame = _oof_frame()
+    for variant in ("chembl_mapping", "target_evidence", "gene_evidence"):
+        for endpoint in ("ln_ic50", "auc"):
+            frame[f"pred_{variant}_{endpoint}"] = 0.1
+    frame.to_csv(path, index=False)
+    loaded = MODULE.validate_oof_file(path, require_evidence_layers=True)
+    assert f"pred_chembl_mapping_ln_ic50" in loaded.columns
+    assert f"pred_target_evidence_auc" in loaded.columns
+    assert f"pred_gene_evidence_ln_ic50" in loaded.columns
