@@ -162,6 +162,63 @@ def build_compact_drug_graph(graph: Any) -> CompactDrugGraph:
     )
 
 
+def summarize_drug_evidence_coverage(graph: CompactDrugGraph) -> dict[str, Any]:
+    """Count drug nodes with complete evidence paths in the response-free graph."""
+    edge_arrays = {
+        relation_index: graph.edge_index[:, graph.edge_type == relation_index]
+        for relation_index in range(len(RELATIONS))
+    }
+
+    drug_to_molecules: dict[int, set[int]] = {}
+    for drug_index, molecule_index in edge_arrays[0].t().tolist():
+        drug_to_molecules.setdefault(int(drug_index), set()).add(int(molecule_index))
+
+    molecule_to_targets: dict[int, set[int]] = {}
+    for molecule_index, target_index in edge_arrays[1].t().tolist():
+        molecule_to_targets.setdefault(int(molecule_index), set()).add(int(target_index))
+
+    target_to_genes: dict[int, set[int]] = {}
+    for target_index, gene_index in edge_arrays[2].t().tolist():
+        target_to_genes.setdefault(int(target_index), set()).add(int(gene_index))
+
+    drugs_with_molecule = set(drug_to_molecules)
+    drugs_with_target: set[int] = set()
+    drugs_with_gene: set[int] = set()
+    for drug_index, molecules in drug_to_molecules.items():
+        targets = {
+            target_index
+            for molecule_index in molecules
+            for target_index in molecule_to_targets.get(molecule_index, set())
+        }
+        if targets:
+            drugs_with_target.add(drug_index)
+        if any(target_to_genes.get(target_index) for target_index in targets):
+            drugs_with_gene.add(drug_index)
+
+    total_drugs = len(graph.drug_ids)
+
+    def record(indices: set[int]) -> dict[str, Any]:
+        return {
+            "count": len(indices),
+            "fraction_of_all_graph_drugs": (
+                float(len(indices) / total_drugs) if total_drugs else 0.0
+            ),
+            "drug_ids": [graph.drug_ids[index] for index in sorted(indices)],
+        }
+
+    return {
+        "total_graph_drugs": total_drugs,
+        "drug_with_chembl_molecule_mapping": record(drugs_with_molecule),
+        "drug_with_direct_target_path": record(drugs_with_target),
+        "drug_with_gene_level_path": record(drugs_with_gene),
+        "interpretation": (
+            "A complete gene-level path is drug -> ChEMBL molecule -> direct "
+            "mechanism target -> gene. Counts are graph-evidence coverage, not "
+            "proof that the mechanism is active in a cell line."
+        ),
+    }
+
+
 class DrugCellLinePairGNN(nn.Module):
     """Three-layer RGCN drug encoder + expression MLP + pairwise dual-endpoint head.
 
