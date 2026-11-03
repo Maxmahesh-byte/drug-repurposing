@@ -695,7 +695,9 @@ def main(args) -> dict:
                 fold,
                 fit_rows,
                 val_rows,
+                pairs[pairs["fold"] != fold].copy(),
                 outer_test,
+                expression,
                 scaled_expression,
                 model_ids,
                 drug_graph,
@@ -705,7 +707,7 @@ def main(args) -> dict:
                 device,
             )
             variant_oof[variant].append(predictions)
-            metrics["expression_preprocessing"] = feature_meta
+            metrics["inner_selection_expression_preprocessing"] = feature_meta
             fold_metrics.append(metrics)
             torch.save(
                 checkpoint,
@@ -801,9 +803,11 @@ def main(args) -> dict:
         },
         "scope": "GDSC2 measured in-vitro single-agent response for known drugs and exact-name-matched cell lines",
         "outer_split": "frozen five-fold GroupKFold by Sanger model ID; folds 1-5",
-        "inner_validation": "same GroupShuffleSplit by Sanger model ID shared by all variants within each outer fold",
-        "target_scaling": "Separate training-only mean/std per endpoint, fitted on inner-fit response rows; reported predictions inverse-transformed to original units",
-        "expression_preprocessing": "Same feature selection and z-scoring within inner-fit cell lines for all variants",
+        "inner_validation": "Same GroupShuffleSplit by Sanger model ID shared by all variants within each outer fold; used only to select the training epoch",
+        "final_refit": "After selecting the epoch, reinitialise each model and train for that epoch count on every response row and Sanger model in the complete outer-training fold; the outer-test fold remains untouched",
+        "target_scaling": "Separate LN(IC50) and AUC mean/std scalers are fitted on all outer-training response rows during final refit; predictions are inverse-transformed to original units",
+        "expression_preprocessing": "Gene variance selection, mean, and standard deviation are refitted using all outer-training cell lines only; preprocessing is not fitted on validation or outer-test cell lines during final refit",
+        "baseline_training_scope": "Final GNN refit uses the complete outer-training fold, aligning training-set cell-line/response-row scope with the existing outer-fold baseline estimators",
         "response_edges_used_for_message_passing": False,
         "model_message_passing_layers": 3,
         "drug_evidence_coverage": evidence_coverage,
