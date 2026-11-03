@@ -295,9 +295,8 @@ def build_chembl_target_dataset(
                     }
                 )
 
-    if not output_rows:
-        raise ValueError("ChEMBL returned no direct human-target mechanisms for exact GDSC2 drug-name matches")
-
+    # An empty target-evidence table is valid when molecule mappings exist
+    # but none of the matched compounds has a qualifying direct human mechanism.
     result = pd.DataFrame(output_rows, columns=OUTPUT_COLUMNS).drop_duplicates()
     mechanism_pairs = set(zip(result["gdsc_drug_id"], result["gdsc_drug_name"]))
     mapped_pairs = preferred_match_pairs | synonym_match_pairs
