@@ -168,3 +168,15 @@ The current audit changes and test coverage are documented in [reports/gdsc2_pai
 The ablation runner now validates that every response pair's expression row index maps to its Sanger model ID, that its graph node ID is the expected namespaced cell-line ID, and that Sanger groups are disjoint across inner-fit, inner-validation, and outer-test partitions. Expression selection/scaling and separate endpoint target scaling are fitted on inner-fit data only. Test-row labels are not converted to training tensors. Baseline joins also validate curve IDs, Sanger IDs, frozen folds, and observed targets. The run summary reports how many drugs have a ChEMBL mapping, a direct target path, and a complete gene-level path.
 
 **Evaluation caveat:** GNN gradient updates use the inner-fit subset, while existing Ridge and drug+cancer median baselines use the full outer-training fold. They share held-out curves and folds, but not the same amount of training data. A follow-up refit on the full outer-training fold after inner validation selects the training epoch would make the estimator comparison more closely matched. The five-seed metrics from the earlier two-layer model do not describe this revised three-layer architecture.
+
+
+For a new architecture revision (for example, the audited three-layer encoder), do not reuse OOF predictions from the earlier two-layer model. Train a fresh seed set into a new output directory:
+
+```bash
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_multiseed.py \
+  --fresh-run-set \
+  --seeds 42 43 44 45 46 \
+  --output-root data/ai/gdsc2_pair_gnn_multiseed_3layer
+```
+
+The `--fresh-run-set` option ignores the script's default seed-42 reference OOF file and trains all five supplied seeds from scratch. Keep this output separate from the previous two-layer `gdsc2_pair_gnn_multiseed` directory.
