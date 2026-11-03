@@ -76,7 +76,9 @@ def select_and_scale_expression(
         "selected_feature_count": int(k),
         "selected_gene_indices": ranked.astype(int).tolist(),
         "training_cell_lines_for_scaler": int(len(train_indices)),
-        "fit_scope": "outer-fold training cell lines only",
+        "fit_scope": "inner-fit cell lines only",
+        "scaler_mean": mean.astype(float).tolist(),
+        "scaler_scale": scale.astype(float).tolist(),
     }
     return transformed.astype(np.float32), metadata
 
