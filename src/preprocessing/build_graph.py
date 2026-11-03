@@ -223,6 +223,49 @@ def _add_gdsc_response_edges(graph, responses):
                 fusion_count=0,
             )
 
+def _add_chembl_mapping_edges(graph, mappings):
+    """Add every uniquely resolved drug-to-ChEMBL-molecule mapping.
+
+    This relation is independent of whether a direct human-target mechanism
+    exists. Mapping provenance is retained on the edge.
+    """
+    required = {
+        "gdsc_drug_id", "gdsc_drug_name", "molecule_chembl_id",
+        "drug_match_method", "matched_chembl_synonym",
+        "chembl_synonym_type", "mapping_source_url", "provenance_state",
+    }
+    missing = required - set(mappings.columns)
+    if missing:
+        raise ValueError(f"ChEMBL molecule mapping table is missing columns: {sorted(missing)}")
+    if mappings.empty:
+        return
+    if mappings["gdsc_drug_id"].astype(str).duplicated().any():
+        raise ValueError("ChEMBL mapping table contains multiple molecules for one GDSC2 drug.")
+    for row in mappings.itertuples(index=False):
+        gdsc_drug = f"GDSC_DRUG:{row.gdsc_drug_id}"
+        molecule = f"CHEMBL_MOLECULE:{row.molecule_chembl_id}"
+        graph.add_node(
+            gdsc_drug, type="drug", drug_name=row.gdsc_drug_name
+        )
+        graph.add_node(
+            molecule, type="chembl_molecule",
+            molecule_chembl_id=row.molecule_chembl_id,
+        )
+        graph.add_edge(
+            gdsc_drug, molecule,
+            relation="exact_name_chembl_mapping",
+            drug_match_method=str(row.drug_match_method or "unknown"),
+            matched_chembl_synonym=str(row.matched_chembl_synonym or ""),
+            chembl_synonym_type=str(row.chembl_synonym_type or ""),
+            mapping_source="ChEMBL molecule record",
+            mapping_source_url=str(row.mapping_source_url),
+            provenance_state=str(row.provenance_state),
+            variant_count=0,
+            copy_number_count=0,
+            fusion_count=0,
+        )
+
+
 def _add_chembl_target_edges(graph, evidence):
     for row in evidence.itertuples(index=False):
         gdsc_drug = f"GDSC_DRUG:{row.gdsc_drug_id}"
@@ -326,9 +369,10 @@ def build_openpedcan_graph():
     copy_number_path = openpedcan_dir / "openpedcan_copy_number_phase3.csv"
     fusion_path = openpedcan_dir / "openpedcan_fusions_phase4.csv"
     gdsc_path = Path(CONFIG["raw_data_path"]) / "gdsc" / "gdsc2_responses.csv"
+    chembl_mapping_path = Path(CONFIG["raw_data_path"]) / "chembl" / "gdsc2_drug_molecule_mappings.csv"
     chembl_path = Path(CONFIG["raw_data_path"]) / "chembl" / "gdsc2_chembl_target_evidence.csv"
-    if not all(path.is_file() for path in (raw_path, mutation_path, copy_number_path, fusion_path, gdsc_path, chembl_path)):
-        raise FileNotFoundError("Build real OpenPedCan, GDSC2, and ChEMBL target-evidence tables before the graph")
+    if not all(path.is_file() for path in (raw_path, mutation_path, copy_number_path, fusion_path, gdsc_path, chembl_mapping_path, chembl_path)):
+        raise FileNotFoundError("Build real OpenPedCan, GDSC2, ChEMBL molecule-mapping, and target-evidence tables before the graph")
 
     df = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
     G = nx.Graph()
@@ -395,6 +439,8 @@ def build_openpedcan_graph():
 
     gdsc_responses = pd.read_csv(gdsc_path, dtype=str, keep_default_na=False)
     _add_gdsc_response_edges(G, gdsc_responses)
+    chembl_mappings = pd.read_csv(chembl_mapping_path, dtype=str, keep_default_na=False)
+    _add_chembl_mapping_edges(G, chembl_mappings)
     chembl_evidence = pd.read_csv(chembl_path, dtype=str, keep_default_na=False)
     _add_chembl_target_edges(G, chembl_evidence)
 
