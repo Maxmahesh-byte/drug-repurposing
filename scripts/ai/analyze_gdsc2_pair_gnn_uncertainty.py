@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 ENDPOINTS = ("ln_ic50", "auc")
-VARIANTS = ("full_graph", "drug_id_only", "expression_only")
+VARIANTS = ("drug_id_only", "chembl_mapping", "target_evidence", "gene_evidence", "expression_only")
 
 
 def metric_block(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float | int | None]:
@@ -189,7 +189,7 @@ def join_external_comparator(
     actual_name = f"actual_{endpoint}"
     joined = run_frame[
         ["curve_id", "sanger_model_id", "fold", actual_name,
-         f"pred_full_graph_{endpoint}"]
+         f"pred_gene_evidence_{endpoint}"]
     ].merge(
         baseline[["curve_id", "fold", actual_column, prediction_column]].rename(
             columns={
@@ -216,7 +216,7 @@ def join_external_comparator(
     return joined.rename(
         columns={
             actual_name: "actual",
-            f"pred_full_graph_{endpoint}": "pred_full_graph",
+            f"pred_gene_evidence_{endpoint}": "pred_full_graph",
             "baseline_prediction": "pred_comparator",
         }
     )
@@ -270,24 +270,28 @@ def main(args) -> dict[str, Any]:
                     }
                 )
 
-            for comparator_name, comparator_column in (
-                ("drug_id_only", f"pred_drug_id_only_{endpoint}"),
-                ("expression_only", f"pred_expression_only_{endpoint}"),
-            ):
-                key = f"{endpoint}:full_graph_vs_{comparator_name}"
+            comparisons = [
+                ("chembl_mapping", "drug_id_only"),
+                ("target_evidence", "chembl_mapping"),
+                ("gene_evidence", "target_evidence"),
+                ("gene_evidence", "drug_id_only"),
+                ("gene_evidence", "expression_only"),
+            ]
+            for model_a, model_b in comparisons:
+                key = f"{endpoint}:{model_a}_vs_{model_b}"
                 result = cluster_bootstrap_mae_difference(
                     frame,
                     actual_column,
-                    f"pred_full_graph_{endpoint}",
-                    comparator_column,
+                    f"pred_{model_a}_{endpoint}",
+                    f"pred_{model_b}_{endpoint}",
                     n_bootstrap=args.bootstrap_replicates,
-                    seed=args.seed + run_index * 100 + (0 if endpoint == "ln_ic50" else 1),
+                    seed=args.seed + run_index * 100 + (0 if endpoint == "ln_ic50" else 1) + len(bootstrap_rows),
                 )
                 bootstrap_rows.append(
                     {
                         "run": label,
                         "endpoint": endpoint,
-                        "comparison": f"full_graph_minus_{comparator_name}",
+                        "comparison": f"{model_a}_minus_{model_b}",
                         **result,
                     }
                 )
@@ -307,12 +311,12 @@ def main(args) -> dict[str, Any]:
                     joined.rename(
                         columns={
                             "actual": actual_column,
-                            "pred_full_graph": f"pred_full_graph_{endpoint}",
+                            "pred_full_graph": f"pred_gene_evidence_{endpoint}",
                             "pred_comparator": "pred_external_baseline",
                         }
                     ),
                     actual_column,
-                    f"pred_full_graph_{endpoint}",
+                    f"pred_gene_evidence_{endpoint}",
                     "pred_external_baseline",
                     n_bootstrap=args.bootstrap_replicates,
                     seed=args.seed + run_index * 1000 + len(bootstrap_rows),
