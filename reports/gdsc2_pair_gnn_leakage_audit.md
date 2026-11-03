@@ -37,3 +37,30 @@ This is not held-out-label leakage, but it is a training-data fairness differenc
 ## Required local validation
 
 Run the pair-GNN and ablation tests, then train a fresh five-seed experiment with the corrected three-layer graph encoder. Keep the outputs separate from the earlier two-layer results. Review evidence coverage in the new metrics JSON and compare all variants against the exact same outer-test records.
+
+
+## Results from the revised three-layer model
+
+A fresh five-seed experiment (seeds 42–46) was run separately from the prior two-layer outputs. Across each seed, the 133,929 OOF curve IDs, Sanger model IDs, outer folds, and measured LN(IC50)/AUC targets were validated as identical. Ten thousand Sanger-cluster bootstrap replicates were generated per comparison and seed.
+
+Mean OOF metrics across seeds (MAE; lower is better):
+
+| Endpoint | Full graph, 3 layers | Drug-ID only | Expression only |
+|---|---:|---:|---:|
+| LN(IC50) | 1.02665 | 1.02966 | 2.01164 |
+| AUC | 0.05311 | 0.05386 | 0.09263 |
+
+Mean paired MAE differences (full graph minus comparator; negative favours full graph):
+
+| Endpoint | Comparator | Mean difference | SD across seeds | Graph lower MAE |
+|---|---|---:|---:|---:|
+| LN(IC50) | Drug-ID only | -0.00302 | 0.01268 | 3/5 seeds |
+| AUC | Drug-ID only | -0.000747 | 0.000588 | 4/5 seeds |
+| LN(IC50) | Drug+cancer median | +0.01832 | 0.00554 | 0/5 seeds |
+| LN(IC50) | Expression Ridge | +0.04063 | 0.00554 | 0/5 seeds |
+| AUC | Drug+cancer median | +0.003074 | 0.000274 | 0/5 seeds |
+| AUC | Expression Ridge | +0.001131 | 0.000274 | 0/5 seeds |
+
+The three-layer model does not improve mean MAE over the prior two-layer model in this run set: LN(IC50) mean MAE changed from 1.02233 to 1.02664, and AUC from 0.052759 to 0.053112. This is descriptive and has not been assessed with a separate architecture-level uncertainty test.
+
+Interpretation: graph evidence provides a small, seed-sensitive advantage over drug-ID-only for LN(IC50), and a modest advantage for AUC in four of five seeds. It does not outperform either established external baseline on either endpoint across these seeds. Increasing message-passing depth has not improved aggregate performance. These metrics remain conditional on the model's inner-fit/validation process and the training-size fairness caveat above.
