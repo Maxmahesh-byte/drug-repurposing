@@ -276,4 +276,12 @@ def test_full_outer_refit_preprocessing_uses_all_train_rows_not_test_rows():
     assert np.allclose(first_meta["scaler_scale"], second_meta["scaler_scale"])
     assert np.allclose(first_mean, second_mean)
     assert np.allclose(first_scale, second_scale)
-    assert np.allclose(first_expression, second_expression)
+    outer_train_ids = set(outer_train["sanger_model_id"])
+    train_expression_rows = [
+        index for index, model_id in enumerate(model_ids)
+        if model_id in outer_train_ids
+    ]
+    assert np.allclose(
+        first_expression[train_expression_rows],
+        second_expression[train_expression_rows],
+    )
