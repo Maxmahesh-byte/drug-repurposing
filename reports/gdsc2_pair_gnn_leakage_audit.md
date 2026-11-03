@@ -64,3 +64,14 @@ Mean paired MAE differences (full graph minus comparator; negative favours full 
 The three-layer model does not improve mean MAE over the prior two-layer model in this run set: LN(IC50) mean MAE changed from 1.02233 to 1.02664, and AUC from 0.052759 to 0.053112. This is descriptive and has not been assessed with a separate architecture-level uncertainty test.
 
 Interpretation: graph evidence provides a small, seed-sensitive advantage over drug-ID-only for LN(IC50), and a modest advantage for AUC in four of five seeds. It does not outperform either established external baseline on either endpoint across these seeds. Increasing message-passing depth has not improved aggregate performance. These metrics remain conditional on the model's inner-fit/validation process and the training-size fairness caveat above.
+
+
+## Follow-up: full outer-training refit implementation
+
+The prior training-volume caveat has been addressed in the new branch `experiment/gdsc2-pair-gnn-full-outer-refit`. Inner validation now selects only the epoch count. A fresh model is then reinitialised and trained for that number of epochs on every response row from the complete outer-training fold. Expression gene selection/scaling and both endpoint target scalers are refitted on that complete outer-training fold. The outer-test fold remains untouched until final prediction.
+
+Additional checks verify that the inner-fit and inner-validation curve IDs partition the full outer-training curve IDs, that the corresponding Sanger groups partition the full outer-training groups, and that neither partition overlaps the outer-test rows. The final checkpoint stores the full-refit model, scalers, selected genes, and selected epoch.
+
+New regression tests include a synthetic end-to-end check showing that changing outer-test labels does not alter the final refit checkpoint, and a test that missing outer-training response rows are rejected.
+
+**Status:** implementation and tests are committed on the new branch; local test execution and a fresh five-seed real-data run using the refit protocol are still pending. Earlier two-layer and three-layer inner-fit-only scores should not be treated as full-refit results.
