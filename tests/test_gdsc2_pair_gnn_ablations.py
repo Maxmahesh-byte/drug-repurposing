@@ -3,6 +3,7 @@ import numpy as np
 import torch
 
 from scripts.ai.run_gdsc2_pair_gnn_ablations import (
+    compare_external_baselines,
     fit_target_scaler,
     split_outer_fold_rows,
     validate_pair_expression_alignment,
@@ -156,3 +157,60 @@ def test_fold_split_rejects_sanger_model_crossing_outer_folds():
     pairs.loc[1, "fold"] = 2
     with pytest.raises(ValueError, match="multiple outer folds"):
         split_outer_fold_rows(pairs, fold=1, validation_fraction=0.25, seed=51)
+
+
+
+def test_external_baseline_comparison_checks_cell_line_identity(tmp_path):
+    baseline_path = tmp_path / "baseline.csv"
+    rows = []
+    oof = []
+    for index in range(4):
+        sid = f"SIDM{index}"
+        fold = (index % 2) + 1
+        actual = 1.0 + index
+        oof_row = {
+            "curve_id": f"CURVE{index}",
+            "fold": fold,
+            "sanger_model_id": sid,
+            "actual_ln_ic50": actual,
+            "pred_full_graph_ln_ic50": actual + 0.1,
+            "pred_drug_id_only_ln_ic50": actual + 0.2,
+            "pred_expression_only_ln_ic50": actual + 0.3,
+        }
+        oof.append(oof_row)
+        rows.append({
+            "curve_id": f"CURVE{index}",
+            "fold": fold,
+            "sanger_model_id": sid,
+            "actual_ln_ic50": actual,
+            "B2_drug_cancer_median": actual + 0.15,
+        })
+    baseline = pd.DataFrame(rows)
+    baseline.to_csv(baseline_path, index=False)
+
+    comparison = compare_external_baselines(
+        pd.DataFrame(oof),
+        {
+            "drug_cancer_median_ln_ic50": (
+                baseline_path, "B2_drug_cancer_median", "actual_ln_ic50"
+            )
+        },
+    )
+    result = comparison["drug_cancer_median_ln_ic50_ln_ic50"]
+    assert result["status"] == "compared"
+    assert result["overlap_rows"] == 4
+    assert result["fold_assignments_identical"] is True
+    assert result["sanger_model_ids_identical"] is True
+    assert result["measured_targets_identical"] is True
+
+    baseline.loc[0, "sanger_model_id"] = "WRONG"
+    baseline.to_csv(baseline_path, index=False)
+    with pytest.raises(ValueError, match="Sanger model IDs differ"):
+        compare_external_baselines(
+            pd.DataFrame(oof),
+            {
+                "drug_cancer_median_ln_ic50": (
+                    baseline_path, "B2_drug_cancer_median", "actual_ln_ic50"
+                )
+            },
+        )
