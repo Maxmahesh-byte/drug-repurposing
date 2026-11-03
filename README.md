@@ -180,3 +180,25 @@ For a new architecture revision (for example, the audited three-layer encoder), 
 ```
 
 The `--fresh-run-set` option ignores the script's default seed-42 reference OOF file and trains all five supplied seeds from scratch. Keep this output separate from the previous two-layer `gdsc2_pair_gnn_multiseed` directory.
+
+
+### Fair outer-fold refit for GDSC2 pair-GNN ablations
+
+The updated ablation runner uses inner validation only to select the number of training epochs. It then discards the epoch-selection model, reinitialises the same variant, and refits it from scratch on **all response rows and all cell lines in the complete outer-training fold**. Expression gene selection/scaling and the separate LN(IC50)/AUC target scalers are refitted on that complete outer-training fold. The outer-test fold is not used for model fitting, epoch selection, or preprocessing.
+
+Run the regression tests:
+
+```bash
+./.venv/bin/python -m pytest tests/test_gdsc2_pair_gnn_ablations.py -q
+```
+
+Then train five fresh seeds of the audited three-layer model and its controls into a new directory:
+
+```bash
+./.venv/bin/python scripts/ai/run_gdsc2_pair_gnn_multiseed.py \
+  --fresh-run-set \
+  --seeds 42 43 44 45 46 \
+  --output-root data/ai/gdsc2_pair_gnn_full_outer_refit_3layer
+```
+
+Each seed runs all three variants across the same five frozen outer folds. The output includes OOF predictions, fold checkpoints, full-refit metrics, evidence coverage, and the cell-line-cluster uncertainty analysis. This supersedes the earlier inner-fit-only training comparison; keep its outputs separate from the previous two-layer and three-layer inner-fit runs. The new local tests and real-data experiment must pass before interpreting results.
