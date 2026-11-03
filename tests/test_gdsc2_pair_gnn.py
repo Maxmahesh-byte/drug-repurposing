@@ -4,6 +4,7 @@ from torch_geometric.data import HeteroData
 from src.training.gdsc2_pair_gnn import (
     DrugCellLinePairGNN,
     build_compact_drug_graph,
+    summarize_drug_evidence_coverage,
 )
 
 
@@ -62,3 +63,57 @@ def test_pair_model_forward_has_two_endpoints():
     )
     assert predictions.shape == (3, 2)
     assert torch.isfinite(predictions).all()
+
+
+
+def test_three_layers_allow_gene_evidence_to_reach_drug_embedding():
+    torch.manual_seed(17)
+    compact = build_compact_drug_graph(_tiny_graph())
+    model = DrugCellLinePairGNN(
+        num_graph_nodes=compact.num_nodes,
+        num_node_types=4,
+        num_relations=compact.num_relations,
+        num_drugs=2,
+        num_expression_features=8,
+        hidden_dim=16,
+        dropout=0.0,
+    )
+    assert model.num_message_passing_layers == 3
+    model.eval()
+    expression = torch.zeros(1, 8)
+    drug_embeddings, _ = model.encode(
+        expression, compact.edge_index, compact.edge_type, compact.node_type
+    )
+    probe = torch.arange(1, 17, dtype=torch.float32)
+    (drug_embeddings[0] * probe).sum().backward()
+
+    # Compact node ordering is drug, molecule, target, gene; gene A is node 6.
+    gene_a_index = (
+        compact.node_counts["drug"]
+        + compact.node_counts["chembl_molecule"]
+        + compact.node_counts["target"]
+    )
+    gene_gradient = model.entity_embedding.weight.grad[gene_a_index]
+    assert gene_gradient is not None
+    assert torch.isfinite(gene_gradient).all()
+    assert gene_gradient.abs().sum().item() > 0
+
+
+def test_evidence_coverage_counts_complete_gene_paths():
+    compact = build_compact_drug_graph(_tiny_graph())
+    coverage = summarize_drug_evidence_coverage(compact)
+    assert coverage["total_graph_drugs"] == 2
+    assert coverage["drug_with_chembl_molecule_mapping"]["count"] == 2
+    assert coverage["drug_with_direct_target_path"]["count"] == 2
+    assert coverage["drug_with_gene_level_path"]["count"] == 2
+
+
+def test_invalid_typed_relation_indices_are_rejected():
+    graph = _tiny_graph()
+    graph["drug", "exact_name_chembl_mapping", "chembl_molecule"].edge_index = torch.tensor([[7], [0]])
+    try:
+        build_compact_drug_graph(graph)
+    except ValueError as exc:
+        assert "Source node index out of range" in str(exc)
+    else:
+        raise AssertionError("Out-of-range typed graph edge should be rejected.")
